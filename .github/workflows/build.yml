@@ -15,6 +15,16 @@ jobs:
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install adafruit-nrfutil
+        # The Adafruit nRF52 build recipe shells out to adafruit-nrfutil to
+        # package the DFU .zip; it is not bundled with the core on the runner.
+        run: pip install adafruit-nrfutil
+
       - name: Install Adafruit nRF52 core
         run: |
           arduino-cli config init --overwrite

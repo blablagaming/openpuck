@@ -1298,7 +1298,10 @@ static void rfSerialPoll(){
           g_slot[0].rec[4],g_slot[0].rec[5],g_slot[0].rec[6],g_slot[0].rec[7]); }
       else if (line[0]=='C'){ g_rfBeacon=g_rfListen=g_rfRaw=g_rfSweep=g_rfHost=false; rfRespondStart(); }
       else if (line[0]=='s'){ g_rfListen=false; g_rfBeacon=false; g_rfRaw=false; g_rfSweep=false; g_rfHost=false; g_rfRespond=false; NRF_RADIO->TASKS_DISABLE=1; Serial.println("# RF off"); }
-      else if (line[0]=='x'){ uint8_t m=strtoul(line+1,0,10); if(m<=2){ if(USBDevice.suspended()){ Serial.println("# mode change blocked: host suspended"); } else { Serial.printf("# switch mode %u (reboot)\n",m); delay(20); saveMode(m); delay(40); NVIC_SystemReset(); } } }   // switch USB mode 0=steam 1=xbox 2=switch (lizard is automatic in steam mode)
+      else if (line[0]=='x'){ uint8_t m=strtoul(line+1,0,10); if(m<=2){
+        if(USBDevice.suspended()){ Serial.println("# mode change blocked: host suspended"); }
+        else { Serial.printf("# switch mode %u (reboot)\n",m); delay(20); saveMode(m); delay(40); NVIC_SystemReset(); }
+      } }   // switch USB mode 0=steam 1=xbox 2=switch (lizard is automatic in steam mode)
       else if (line[0]=='c'){ g_rfCh=atoi(line+1); Serial.printf("# ch=%u\n",g_rfCh); if(g_rfListen) rfListenStart(); }
       else if (line[0]=='p'){ g_rfPrefix=strtol(line+1,0,16); Serial.printf("# prefix=%02X\n",g_rfPrefix); if(g_rfListen) rfListenStart(); }
       else if (line[0]=='i'){ g_crcinit=strtoul(line+1,0,16); Serial.printf("# crcinit=%06lX\n",(unsigned long)g_crcinit); }

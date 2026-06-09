@@ -286,11 +286,24 @@ does a `detach -> rebuild -> attach` so the host re-reads the descriptor cleanly
 - VID:PID `28DE:1304`
 - Four puck HID interfaces (CDC + WebUSB also present)
 - `0x45` reports are forwarded to the connected slot's HID interface
-- **Seamless lizard**: when Steam's `0x87` heartbeat is alive, `0x45` is forwarded; when it stops
+- **Seamless lizard**: when Steam is driving the device, `0x45` is forwarded; when it isn't
   (Steam closed, 7 s watchdog) the same `0x45` is translated into mouse (`0x40`) + keyboard (`0x41`)
   reports on the **same** puck interface, so the device is a driverless desktop keyboard+mouse with no
   mode switch. This is purely USB-side; the RF poll and relay are unchanged. (There is no standalone
   lizard mode.)
+- **"Steam is driving" signal**: *any* Steam OUTPUT/settings report (`0x80`–`0x89`, e.g. the `0x87`
+  lizard-off heartbeat, LED, or a `0x82` haptic) refreshes the watchdog — not just `0x87`. This makes
+  the puck leave lizard for gamepad on Steam's **first** contact, even if that first packet is a haptic
+  that arrives before the heartbeat.
+- **Haptics are gated on this decision**: haptic reports are **never** relayed to the controller while
+  the puck is presenting lizard. Relaying haptics while Steam isn't reading `0x45` back made Steam loop
+  the same command, leaving the controller buzzing; suppressing them keeps the lizard state clean.
+- **Which OUTPUT reports are relayed**: the haptic/actuator reports `0x80`–`0x86` are forwarded to the
+  **connected slot only** (the slot gate is what stops a haptic aimed at another of the four exposed
+  slots from buzzing the single controller). The 63-byte settings/config reports `0x87`/`0x88`/`0x89`
+  are not haptics and are not pushed on this path (`0x87` lizard-off reaches the controller via the
+  feature `0x01` passthrough). Restricting this to `0x82` alone silently dropped the ping/grip/test
+  haptics, which use other report IDs.
 
 ### 9.2 Xbox mode
 
@@ -302,7 +315,7 @@ does a `detach -> rebuild -> attach` so the host re-reads the descriptor cleanly
 
 - VID:PID `0F0D:0092` (HORI Pokkén Tournament Pro Pad), clean device (no CDC/WebUSB)
 - Single HID interface with the canonical HORIPAD descriptor (interrupt IN + OUT endpoints), accepted by
-  a real Switch console with no handshake; an 8-byte report is streamed at ~125 Hz
+  a real Switch console with no handshake; an 8-byte report is streamed at ~250 Hz
 
 ## 10. WebUSB control channel
 
@@ -348,7 +361,7 @@ Status blob payload:
 
 ## 11. Timing notes
 
-- Default poll interval: `800` microseconds
+- Default poll interval: `4000` microseconds (250 Hz, matches SC2 report rate)
 - Default RX window: `1200` microseconds
 - Discovery beacon continues on channel 2 even after a connected session exists
 - Connected session can be moved to a cleaner channel such as 18 or 52

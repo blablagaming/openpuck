@@ -92,7 +92,7 @@ volatile unsigned long g_rumbleMs = 0;   // millis of last rumble OUT packet (de
 // persisted, runtime-tunable config (Cfg struct + load/saveCfg below; CDC M/F/D/W/B + WebUSB set these):
 static int     g_mDiv = 64, g_mFric = 94;    // xbox mouse sensitivity divisor / friction%
 static uint8_t g_abSwap = 0;                 // 1 = swap A/B and X/Y (Nintendo face-button layout)
-static uint8_t g_back[4] = {5,6,7,8};        // back paddles L4,R4,L5,R5 -> button codes (see codeToXB; 5=LB 6=RB 7=L3 8=R3)
+static uint8_t g_back[4] = {5,6,7,8};        // back paddles L4,R4,L5,R5 -> button codes (0..11 buttons, 12..15 D-pad U/D/L/R)
 #define POLL_US_DEFAULT 4000u                 // 250 Hz — matches SC2 input report rate (1000000/250 = 4000 us)
 #define USB_STREAM_MS   4u                    // host-side HID stream cadence for translated modes (~250 Hz)
 static const uint32_t g_pollUs = POLL_US_DEFAULT;   // RF poll cadence (us). FIXED — not configurable. Any rate persisted by an older build is ignored and overwritten with the default on boot (see loadCfg).
@@ -816,11 +816,12 @@ static uint32_t btnsOf(const uint8_t* r){ return (uint32_t)r[2]|((uint32_t)r[3]<
 #define TB_RPADC 0x400000u
 #define TB_LPADT 0x2000000u
 #define TB_LPADC 0x4000000u
-// button code (g_back[], g_abSwap targets) -> legacy XInput bit. 0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=Start 11=Guide
+// button code (g_back[], g_abSwap targets) -> legacy XInput bit. 0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=Start 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright
 static uint16_t codeToXB(uint8_t c){
   switch(c){ case 1:return XB_A; case 2:return XB_B; case 3:return XB_X; case 4:return XB_Y;
     case 5:return XB_LB; case 6:return XB_RB; case 7:return XB_L3; case 8:return XB_R3;
-    case 9:return XB_BACK; case 10:return XB_START; case 11:return XB_GUIDE; default:return 0; }
+    case 9:return XB_BACK; case 10:return XB_START; case 11:return XB_GUIDE;
+    case 12:return XB_DUP; case 13:return XB_DDOWN; case 14:return XB_DLEFT; case 15:return XB_DRIGHT; default:return 0; }
 }
 static void rfXboxGamepad(const uint8_t* r){
   uint32_t b=btnsOf(r);
@@ -955,6 +956,12 @@ static uint16_t codeToSwitch(uint8_t c, uint16_t fA,uint16_t fB,uint16_t fX,uint
     case 5:return 0x10; case 6:return 0x20; case 7:return 0x400; case 8:return 0x800;
     case 9:return 0x100; case 10:return 0x200; case 11:return 0x1000; default:return 0; }
 }
+static inline void backCodeToHatDirs(uint8_t c, bool& u, bool& d, bool& l, bool& r){
+  if(c==12) u=true;
+  else if(c==13) d=true;
+  else if(c==14) l=true;
+  else if(c==15) r=true;
+}
 static void switchBuildHoripad(uint8_t out[8]){
   uint32_t b=g_swBtns; uint16_t btn=0;
   // Mode-switch chord (all 4 back + A/X/Y): don't pass the face press to the console while the back-4 are held.
@@ -972,6 +979,10 @@ static void switchBuildHoripad(uint8_t out[8]){
   if(b&TB_L4)btn|=codeToSwitch(g_back[0],fA,fB,fX,fY); if(b&TB_R4)btn|=codeToSwitch(g_back[1],fA,fB,fX,fY);
   if(b&TB_L5)btn|=codeToSwitch(g_back[2],fA,fB,fX,fY); if(b&TB_R5)btn|=codeToSwitch(g_back[3],fA,fB,fX,fY);
   bool u=b&TB_DUP,d=b&TB_DDN,l=b&TB_DLF,r=b&TB_DRT;           // hat: 0=N..7=NW, 8=neutral
+  if(b&TB_L4) backCodeToHatDirs(g_back[0],u,d,l,r);
+  if(b&TB_R4) backCodeToHatDirs(g_back[1],u,d,l,r);
+  if(b&TB_L5) backCodeToHatDirs(g_back[2],u,d,l,r);
+  if(b&TB_R5) backCodeToHatDirs(g_back[3],u,d,l,r);
   uint8_t hat=8;
   if(u&&r)hat=1; else if(r&&d)hat=3; else if(d&&l)hat=5; else if(l&&u)hat=7;
   else if(u)hat=0; else if(r)hat=2; else if(d)hat=4; else if(l)hat=6;
@@ -1041,7 +1052,8 @@ static void steamPadsToTouch(uint32_t b, uint16_t touchH, int16_t lpx, int16_t l
 static void psOrBackCode(uint32_t* b, uint8_t c){
   switch(c){ case 1:*b|=TB_A; break; case 2:*b|=TB_B; break; case 3:*b|=TB_X; break; case 4:*b|=TB_Y; break;
     case 5:*b|=TB_LB; break; case 6:*b|=TB_RB; break; case 7:*b|=TB_L3; break; case 8:*b|=TB_R3; break;
-    case 9:*b|=TB_VIEW; break; case 10:*b|=TB_MENU; break; case 11:*b|=TB_STEAM; break; default: break; }
+    case 9:*b|=TB_VIEW; break; case 10:*b|=TB_MENU; break; case 11:*b|=TB_STEAM; break;
+    case 12:*b|=TB_DUP; break; case 13:*b|=TB_DDN; break; case 14:*b|=TB_DLF; break; case 15:*b|=TB_DRT; break; default: break; }
 }
 static uint32_t psButtonsFromSteam(uint32_t raw){
   uint32_t b=raw;
@@ -1096,7 +1108,8 @@ static const uint8_t SWPRO_HID_DESC[]={
 static uint32_t codeToJc(uint8_t c, uint32_t fA,uint32_t fB,uint32_t fX,uint32_t fY){
   switch(c){ case 1:return fA; case 2:return fB; case 3:return fX; case 4:return fY;
     case 5:return JC_BTN_L; case 6:return JC_BTN_R; case 7:return JC_BTN_LSTICK; case 8:return JC_BTN_RSTICK;
-    case 9:return JC_BTN_MINUS; case 10:return JC_BTN_PLUS; case 11:return JC_BTN_HOME; default:return 0; }
+    case 9:return JC_BTN_MINUS; case 10:return JC_BTN_PLUS; case 11:return JC_BTN_HOME;
+    case 12:return JC_BTN_UP; case 13:return JC_BTN_DOWN; case 14:return JC_BTN_LEFT; case 15:return JC_BTN_RIGHT; default:return 0; }
 }
 static int16_t g_swProAX=0,g_swProAY=0,g_swProAZ=0,g_swProGX=0,g_swProGY=0,g_swProGZ=0;
 static unsigned long g_swProLastMs=0;
@@ -1773,7 +1786,7 @@ static void rfSerialPoll(){
       else if (line[0]=='E'){ g_mDiv=strtoul(line+1,0,10); if(g_mDiv<4)g_mDiv=4; saveCfg(); Serial.printf("# xbox-mouse sensitivity divisor=%d (lower=faster)\n",g_mDiv); }
       else if (line[0]=='F'){ g_mFric=strtoul(line+1,0,10); if(g_mFric>99)g_mFric=99; saveCfg(); Serial.printf("# xbox-mouse friction=%d%% (higher=more glide/momentum)\n",g_mFric); }
       else if (line[0]=='W'){ g_abSwap=!g_abSwap; saveCfg(); Serial.printf("# A/B + X/Y swap %s (Nintendo layout)\n",g_abSwap?"ON":"off"); }
-      else if (line[0]=='K'){ int i=line[1]-'0'; uint8_t code=strtoul(line+2,0,10); if(i>=0&&i<4){ g_back[i]=code; saveCfg(); Serial.printf("# back[%d] (%s) -> code %u  [0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=Start 11=Guide]\n",i,(const char*[]){"L4","R4","L5","R5"}[i],code); } else Serial.println("# usage: K<0-3> <code>  (0=L4 1=R4 2=L5 3=R5)"); }
+      else if (line[0]=='K'){ int i=line[1]-'0'; uint8_t code=strtoul(line+2,0,10); if(i>=0&&i<4){ g_back[i]=code; saveCfg(); Serial.printf("# back[%d] (%s) -> code %u  [0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=Start 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright]\n",i,(const char*[]){"L4","R4","L5","R5"}[i],code); } else Serial.println("# usage: K<0-3> <code>  (0=L4 1=R4 2=L5 3=R5)"); }
       else if (line[0]=='J'){ char* sp=0; uint8_t id=strtoul(line+1,&sp,0); uint16_t val=sp?strtoul(sp,0,0):0;  // inject SET-SETTINGS to controller: report 0x87 [id][val u16 LE]
         g_relayBuf[0]=0x87; g_relayBuf[1]=3; g_relayBuf[2]=id; g_relayBuf[3]=val&0xFF; g_relayBuf[4]=val>>8; g_relayN=5; g_relayPend=true;
         Serial.printf("# queued SET-SETTINGS id=0x%02X val=%u (relay 0x87) — watch new=/s\n",id,val); }

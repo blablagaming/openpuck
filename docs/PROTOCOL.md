@@ -295,9 +295,15 @@ does a `detach -> rebuild -> attach` so the host re-reads the descriptor cleanly
   lizard-off heartbeat, LED, or a `0x82` haptic) refreshes the watchdog — not just `0x87`. This makes
   the puck leave lizard for gamepad on Steam's **first** contact, even if that first packet is a haptic
   that arrives before the heartbeat.
-- **Haptics are gated on this decision**: a `0x82` haptic is **never** relayed to the controller while
+- **Haptics are gated on this decision**: haptic reports are **never** relayed to the controller while
   the puck is presenting lizard. Relaying haptics while Steam isn't reading `0x45` back made Steam loop
   the same command, leaving the controller buzzing; suppressing them keeps the lizard state clean.
+- **Which OUTPUT reports are relayed**: the haptic/actuator reports `0x80`–`0x86` are forwarded to the
+  **connected slot only** (the slot gate is what stops a haptic aimed at another of the four exposed
+  slots from buzzing the single controller). The 63-byte settings/config reports `0x87`/`0x88`/`0x89`
+  are not haptics and are not pushed on this path (`0x87` lizard-off reaches the controller via the
+  feature `0x01` passthrough). Restricting this to `0x82` alone silently dropped the ping/grip/test
+  haptics, which use other report IDs.
 
 ### 9.2 Xbox mode
 

@@ -357,23 +357,26 @@ static void rfConnFlushRelay(uint8_t ch){
 
 // ---- command channel; `slot` is the interface index (interface N == bond slot N) ----
 static void handleSet(int slot, uint8_t rid, hid_report_type_t type, uint8_t const *b, uint16_t n) {
-  if (type == HID_REPORT_TYPE_OUTPUT) {   // Steam OUTPUT reports 0x80-0x89. ONLY the haptic (0x82) is relayed to
-    // the controller, and ONLY when it arrives on the CONNECTED slot's interface. We have one controller but
-    // expose 4 puck slots; forwarding the other 0x80-0x89 reports (LED/config), or a haptic Steam aimed at a
-    // different slot, made the controller buzz at random. The real puck (4 independent slots) never does that.
+  if (type == HID_REPORT_TYPE_OUTPUT) {   // Steam OUTPUT reports 0x80-0x89. The haptic/actuator reports (0x80-0x86)
+    // are relayed to the controller, and ONLY when they arrive on the CONNECTED slot's interface. We have one
+    // controller but expose 4 puck slots, and a report aimed at a DIFFERENT slot made the controller buzz at
+    // random -> that is what the slot gate below fixes. (This used to also clamp to 0x82-ONLY, which silently
+    // dropped the ping / grip / test haptics: those ride other report IDs such as 0x85/0x86, so they never
+    // reached the controller.) The 63-byte settings/config reports 0x87/0x88/0x89 are NOT haptics and are not
+    // pushed here — 0x87 (lizard-off/settings) reaches the controller through the feature-0x01 passthrough path.
     if (rid >= 0x80 && rid <= 0x89) {
       hapLogAdd((uint8_t)slot, rid, b, n);   // capture ALL OUTPUT reports (even un-relayed) for the 'H' dump
       g_steamAliveMs = millis();   // ANY Steam OUTPUT report (not just the 0x87 heartbeat) means Steam is present and
                                    // driving -> leave lizard for gamepad NOW, so a haptic that arrives before the
                                    // first 0x87 doesn't get relayed while we're still presenting lizard (-> buzz loop).
     }
-    if (rid == 0x82 && n >= 1 && hapticRelaySlotOk(slot) && !lizardActive()) {  // wrap as a SET sub-TLV like the report-01 path
+    if (rid >= 0x80 && rid <= 0x86 && n >= 1 && hapticRelaySlotOk(slot) && !lizardActive()) {  // wrap as a SET sub-TLV like the report-01 path
       if (!haptic82Blocked()) {
         uint8_t m = n > (uint16_t)(sizeof g_relayBuf - 2) ? (sizeof g_relayBuf - 2) : n;
         g_relayBuf[0] = rid; g_relayBuf[1] = m; memcpy(g_relayBuf + 2, b, m);
         g_relayN = m + 2; g_relayPend = true;
       }
-      haptic82HostReport(b, n);  // track on/off for the stuck-haptic watchdog
+      if (rid == 0x82) haptic82HostReport(b, n);  // on/off tracking is only meaningful for the 0x82 stream
     }
     if (Serial.availableForWrite() > 80) {                      // log so we can see what Steam actually sends (e.g. glide haptics)
       Serial.printf("# OUT if%d rid=%02X n=%u:", slot, rid, n);

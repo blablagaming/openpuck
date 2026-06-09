@@ -92,11 +92,6 @@
       <p class="note">Right-pad cursor in Steam-mode lizard (Steam closed) and in Xbox mode. Sensitivity is a divisor — lower = faster pointer. Glide = how long the cursor coasts after a flick.</p>
     </div>
 
-    <div class="card" id="steamCard">
-      <h2>Steam-mode trackpad smoothing</h2>
-      <div class="row"><label>Smoothing</label><input type="range" id="padSmooth" min="5" max="100" step="1"><span class="val" id="padSmoothV"></span></div>
-      <p class="note">Interpolation alpha. 100 = off (raw 46 Hz capsense), lower = smoother but slightly laggier.</p>
-    </div>
 
     <div class="card">
       <h2>Button mapping</h2>
@@ -185,22 +180,21 @@ async function readBlob(){
   }catch(e){ if(dev) log("read err: "+e.message); return null; }
 }
 function applyBlob(p){
-  // [ver][mode][mDiv][mFric][padSmooth][abSwap][b0..b3][slot][up][f1lo][f1hi][pollU100(unused)][newlo][newhi]
-  const mode=p[1], mDiv=p[2], mFric=p[3], padSmooth=p[4], abSwap=p[5];
+  // [ver][mode][mDiv][mFric][rsvd][abSwap][b0..b3][slot][up][f1lo][f1hi][pollU100(unused)][newlo][newhi]
+  const mode=p[1], mDiv=p[2], mFric=p[3], abSwap=p[5];   // p[4] reserved (ex-padSmooth)
   const back=[p[6],p[7],p[8],p[9]], slot=p[10], up=p[11], f1=(p[12]|(p[13]<<8));
   const newps=(p.length>16?(p[15]|(p[16]<<8)):0), persistMode=(p.length>22?p[22]:0);
   const chord=(p.length>25)?[p[23],p[24],p[25]]:[3,1,2];   // v2 blob: chordBtn after qos/persist
   // mode buttons
   for(const b of document.querySelectorAll(".modebtn")) b.classList.toggle("active", +b.dataset.mode===mode);
   $("#mouseCard").style.opacity = (mode===1||mode===3)?1:0.5;
-  $("#steamCard").style.opacity = mode===0?1:0.5;
   // status
   $("#stLink").innerHTML = up? '<span class="pill up">up</span>' : '<span class="pill dn">down</span>';
   $("#stSlot").textContent = slot===0xFF? "—" : slot;
   $("#stRate").textContent = up? f1+" /s" : "—";
   $("#stNew").textContent = up? newps+" /s" : "—";
   // sliders (only if not being dragged)
-  setSlider("mDiv",mDiv); setSlider("mFric",mFric); setSlider("padSmooth",padSmooth);
+  setSlider("mDiv",mDiv); setSlider("mFric",mFric);
   $("#abSwap").textContent = abSwap? "on":"off"; $("#abSwap").classList.toggle("active",!!abSwap);
   $("#persistMode").textContent = persistMode? "on":"off"; $("#persistMode").classList.toggle("active",!!persistMode);
   for(const sel of document.querySelectorAll("select.back")){ if(document.activeElement!==sel) sel.value=back[+sel.dataset.i]; }
@@ -227,8 +221,8 @@ async function startPolling(){
 $("#connectBtn").onclick=connect;
 $("#abSwap").onclick=()=>{ const on=$("#abSwap").classList.contains("active"); setField(4, on?0:1); };
 $("#persistMode").onclick=()=>{ const on=$("#persistMode").classList.contains("active"); setField(16, on?0:1); };
-for(const id of ["mDiv","mFric","padSmooth"]){
-  const field={mDiv:1,mFric:2,padSmooth:3}[id];
+for(const id of ["mDiv","mFric"]){
+  const field={mDiv:1,mFric:2}[id];
   $("#"+id).addEventListener("input", ()=>{ $("#"+id+"V").textContent=fmtSlider(id,$("#"+id).value); });
   $("#"+id).addEventListener("change", ()=>setField(field, +$("#"+id).value));
 }

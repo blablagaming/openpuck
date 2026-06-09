@@ -90,7 +90,7 @@ static uint8_t g_bootMode = 0xFF;       // one-shot: boot into this mode once th
 volatile uint8_t g_rumble = 0;   // legacy XInput rumble strength from the host's OUT packet (0=off); drives the haptic relay when the XInput descriptor is used
 volatile unsigned long g_rumbleMs = 0;   // millis of last rumble OUT packet (declared here — used by xi_xfer above the watchdog block); stuck-rumble watchdog
 // persisted, runtime-tunable config (Cfg struct + load/saveCfg below; CDC M/F/D/W/B + WebUSB set these):
-static int     g_mDiv = 64, g_mFric = 94, g_padSmooth = 35;  // xbox mouse sens/friction%, steam pad smoothing%
+static int     g_mDiv = 64, g_mFric = 94;    // xbox mouse sensitivity divisor / friction%
 static uint8_t g_abSwap = 0;                 // 1 = swap A/B and X/Y (Nintendo face-button layout)
 static uint8_t g_back[4] = {5,6,7,8};        // back paddles L4,R4,L5,R5 -> button codes (see codeToXB; 5=LB 6=RB 7=L3 8=R3)
 #define POLL_US_DEFAULT 4000u                 // 250 Hz — matches SC2 input report rate (1000000/250 = 4000 us)
@@ -261,9 +261,9 @@ static void saveBonds() {
 }
 #define CFG_FILE "/cfg.bin"
 #define CFG_MAGIC 0xC7   // bumped (chordBtn[3]): old cfg ignored -> clean defaults on first boot
-struct Cfg { uint8_t magic, mode, mDiv, mFric, padSmooth, abSwap, back[4], pollU100, persistMode, bootMode, chordBtn[3]; };
+struct Cfg { uint8_t magic, mode, mDiv, mFric, rsvd0, abSwap, back[4], pollU100, persistMode, bootMode, chordBtn[3]; };  // rsvd0 = ex-padSmooth (kept for layout)
 static void saveCfg(){
-  Cfg c={CFG_MAGIC,g_usbMode,(uint8_t)g_mDiv,(uint8_t)g_mFric,(uint8_t)g_padSmooth,g_abSwap,
+  Cfg c={CFG_MAGIC,g_usbMode,(uint8_t)g_mDiv,(uint8_t)g_mFric,0,g_abSwap,
          {g_back[0],g_back[1],g_back[2],g_back[3]},(uint8_t)(g_pollUs/100),(uint8_t)(g_persistMode?1:0),g_bootMode,
          {g_chordBtn[0],g_chordBtn[1],g_chordBtn[2]}};
   InternalFS.remove(CFG_FILE); File f(InternalFS);
@@ -273,7 +273,7 @@ static void loadCfg(){
   Cfg c; File f(InternalFS); bool consume=false;
   if(f.open(CFG_FILE,FILE_O_READ)){
     if(f.read((uint8_t*)&c,sizeof c)==(int)sizeof c && c.magic==CFG_MAGIC){
-      g_mDiv=c.mDiv?c.mDiv:64; g_mFric=c.mFric; g_padSmooth=c.padSmooth?c.padSmooth:35;
+      g_mDiv=c.mDiv?c.mDiv:64; g_mFric=c.mFric;
       g_abSwap=c.abSwap; for(int i=0;i<4;i++) g_back[i]=c.back[i];
       g_persistMode = c.persistMode?true:false;
       // poll rate is fixed (g_pollUs const = POLL_US_DEFAULT). A stale rate from an older build is never
@@ -800,24 +800,6 @@ static uint32_t btnsOf(const uint8_t* r){ return (uint32_t)r[2]|((uint32_t)r[3]<
 #define TB_RPADC 0x400000u
 #define TB_LPADT 0x2000000u
 #define TB_LPADC 0x4000000u
-// Trackpad coords genuinely refresh only ~46Hz (capsense floor) but reports ship ~300Hz -> stale-repeats.
-// Forwarding those raw to Steam defeats its interpolation (it sees no-motion then a jump). Smooth the pad
-// X/Y in the forwarded report 0x45 (exponential LERP toward the latest genuine value each report) so Steam
-// sees continuous motion. g_padSmooth = alpha% (100 = off, lower = smoother/laggier). 'D<pct>' tunes it.
-// (g_padSmooth declared at top with the persisted config)
-static void smoothPad(uint8_t* rep){     // rep = report 0x45; smooth LPad(@18/20) + RPad(@24/26) in place
-  if(g_padSmooth>=100) return;
-  float a=g_padSmooth/100.0f; uint32_t b=btnsOf(rep);
-  static float lsx=0,lsy=0,rsx=0,rsy=0; static bool lpt=false,rpt=false;
-  bool lt=b&TB_LPADT; int16_t lx=rep[18]|(rep[19]<<8), ly=rep[20]|(rep[21]<<8);
-  if(lt){ if(!lpt){lsx=lx;lsy=ly;} else {lsx+=(lx-lsx)*a; lsy+=(ly-lsy)*a;}
-    int16_t ox=(int16_t)lsx,oy=(int16_t)lsy; rep[18]=ox;rep[19]=ox>>8;rep[20]=oy;rep[21]=oy>>8; }
-  lpt=lt;
-  bool rt=b&TB_RPADT; int16_t rx=rep[24]|(rep[25]<<8), ry=rep[26]|(rep[27]<<8);
-  if(rt){ if(!rpt){rsx=rx;rsy=ry;} else {rsx+=(rx-rsx)*a; rsy+=(ry-rsy)*a;}
-    int16_t ox=(int16_t)rsx,oy=(int16_t)rsy; rep[24]=ox;rep[25]=ox>>8;rep[26]=oy;rep[27]=oy>>8; }
-  rpt=rt;
-}
 // button code (g_back[], g_abSwap targets) -> legacy XInput bit. 0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=Start 11=Guide
 static uint16_t codeToXB(uint8_t c){
   switch(c){ case 1:return XB_A; case 2:return XB_B; case 3:return XB_X; case 4:return XB_Y;
@@ -1446,7 +1428,7 @@ static uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t 
           uint8_t tlen=rfrx[idx], ttype=rfrx[idx+1];    // pace with the real puck — taking only [0] halved our rate.
           if(tlen==0) break;
           // Only a FULL 0x45 report that fits entirely in rfrx: a short or late/garbled TLV must not let the
-          // decode read — or smoothPad WRITE rep[18..27] — past the RF buffer (corrupts rftx/RAM -> eventual crash).
+          // decode read past the RF buffer (corrupts rftx/RAM -> eventual crash).
           if(ttype==6 && tlen>=28 && (size_t)(idx+2)+tlen<=sizeof(rfrx) && rfrx[idx+2]==0x45){
             const uint8_t* rep=&rfrx[idx+2];            // report 0x45: [0x45][seq][buttons u32]...
             bool fresh=(rep[1]!=g_lastSeq); if(fresh){ g_stNew++; g_lastSeq=rep[1]; }  // genuine new report vs stale poll-repeat
@@ -1487,7 +1469,7 @@ static uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t 
                 rfLizard(rep, &hid[g_connSlot], &hid[g_connSlot], 0x40, 0x41);
               } else {
                 uint8_t blen=tlen-1; if(blen>45)blen=45;  // body after the 0x45 id byte
-                smoothPad((uint8_t*)rep);                 // interpolate the 46Hz pad coords -> continuous motion for Steam
+                // forward the puck's raw pad coords untouched — Steam does its own interpolation/smoothing.
                 // forward only FRESH reports (the real puck dedupes -> Steam gets a clean unique stream; sending
                 // stale repeats makes Steam's velocity/smoothing stair-step). g_fwdNewOnly toggles for A/B.
                 if((fresh || !g_fwdNewOnly) && g_slot[g_connSlot].used && hid[g_connSlot].ready())
@@ -1665,11 +1647,11 @@ static void rfBeaconOnce(){
 // ===================== WebUSB config channel =====================
 // Browser panel (copycat_config.html) <-> firmware, binary framed.
 //   host->dev:  0x01                  GET  -> reply status blob
-//               0x02 <field> <value>  SET one byte field (1=mDiv 2=mFric 3=padSmooth 4=abSwap 5..8=back[0..3] 9=(removed, poll rate fixed)
+//               0x02 <field> <value>  SET one byte field (1=mDiv 2=mFric 3=(removed, ex-padSmooth) 4=abSwap 5..8=back[0..3] 9=(removed, poll rate fixed)
 //                                     10=e7b 11=relayOp 12=relaySub 13=testHaptic 14=fwdNewOnly 15=qos 16=persistMode
 //                                     17..19=chordBtn B/X/Y mode assignments)
 //               0x03 <mode>           switch USB mode (0..6): persist + reboot
-//   dev->host:  0xA5 <len> <payload>  payload = [ver=1][mode][mDiv][mFric][padSmooth][abSwap]
+//   dev->host:  0xA5 <len> <payload>  payload = [ver=1][mode][mDiv][mFric][rsvd=0][abSwap]
 //                                                [back0..3][connSlot(0xFF=none)][linkUp][f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub]
 #define WB_PAYLEN 26
 static void webusbSendBlob(){
@@ -1678,7 +1660,7 @@ static void webusbSendBlob(){
   uint8_t p[2+WB_PAYLEN];
   p[0]=0xA5; p[1]=WB_PAYLEN;
   p[2]=2;                          // protocol version (2 = chordBtn[3] in blob)
-  p[3]=g_usbMode; p[4]=(uint8_t)g_mDiv; p[5]=(uint8_t)g_mFric; p[6]=(uint8_t)g_padSmooth; p[7]=g_abSwap;
+  p[3]=g_usbMode; p[4]=(uint8_t)g_mDiv; p[5]=(uint8_t)g_mFric; p[6]=0 /*rsvd: ex-padSmooth*/; p[7]=g_abSwap;
   p[8]=g_back[0]; p[9]=g_back[1]; p[10]=g_back[2]; p[11]=g_back[3];
   p[12]=(g_connSlot>=0)?(uint8_t)g_connSlot:0xFF;
   p[13]=up?1:0;
@@ -1710,7 +1692,7 @@ static void webusbPoll(){
         switch(f){
           case 1: g_mDiv = v<4?4:v; break;
           case 2: g_mFric = v>99?99:v; break;
-          case 3: g_padSmooth = v<5?5:(v>100?100:v); break;
+          // case 3 (padSmooth) removed — Steam-mode pad coords are forwarded raw; Steam does its own smoothing.
           case 4: g_abSwap = v?1:0; break;
           case 5: case 6: case 7: case 8: g_back[f-5]=v; break;
           // case 9 (pollU100) removed — poll rate is fixed at POLL_US_DEFAULT and no longer configurable.
@@ -1775,7 +1757,6 @@ static void rfSerialPoll(){
       else if (line[0]=='C'){ g_sessCh=strtoul(line+1,0,10); Serial.printf("# session channel=%u (re-pair/reconnect to apply)\n",g_sessCh); }
       else if (line[0]=='E'){ g_mDiv=strtoul(line+1,0,10); if(g_mDiv<4)g_mDiv=4; saveCfg(); Serial.printf("# xbox-mouse sensitivity divisor=%d (lower=faster)\n",g_mDiv); }
       else if (line[0]=='F'){ g_mFric=strtoul(line+1,0,10); if(g_mFric>99)g_mFric=99; saveCfg(); Serial.printf("# xbox-mouse friction=%d%% (higher=more glide/momentum)\n",g_mFric); }
-      else if (line[0]=='D'){ g_padSmooth=strtoul(line+1,0,10); if(g_padSmooth<5)g_padSmooth=5; if(g_padSmooth>100)g_padSmooth=100; saveCfg(); Serial.printf("# steam pad smoothing alpha=%d%% (100=off, lower=smoother/laggier)\n",g_padSmooth); }
       else if (line[0]=='W'){ g_abSwap=!g_abSwap; saveCfg(); Serial.printf("# A/B + X/Y swap %s (Nintendo layout)\n",g_abSwap?"ON":"off"); }
       else if (line[0]=='K'){ int i=line[1]-'0'; uint8_t code=strtoul(line+2,0,10); if(i>=0&&i<4){ g_back[i]=code; saveCfg(); Serial.printf("# back[%d] (%s) -> code %u  [0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=Start 11=Guide]\n",i,(const char*[]){"L4","R4","L5","R5"}[i],code); } else Serial.println("# usage: K<0-3> <code>  (0=L4 1=R4 2=L5 3=R5)"); }
       else if (line[0]=='J'){ char* sp=0; uint8_t id=strtoul(line+1,&sp,0); uint16_t val=sp?strtoul(sp,0,0):0;  // inject SET-SETTINGS to controller: report 0x87 [id][val u16 LE]

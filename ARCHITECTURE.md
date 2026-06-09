@@ -86,6 +86,7 @@ just points at the `OpenPuck` directory). Modules are layered low → high:
 | `webusb_config.{h,cpp}` | The WebUSB binary config channel for the browser panel. |
 | `serial_console.{h,cpp}` | The CDC single-letter debug command line. |
 | `wake_hid.{h,cpp}` | A boot-mouse HID interface added to the clean controller modes so the host honors USB remote-wakeup (see "Wake from sleep"). |
+| `status_led.{h,cpp}` | Wake-armed LED indicator: a short blip every ~2s while the host is suspended, dark otherwise. Drives both the Feather user LED (P1.15) and the SuperMini clone's blue LED (P0.15); pins/polarity overridable. |
 
 ## The controller abstraction
 
@@ -218,6 +219,9 @@ graze and nearly impossible to keep asleep. The only wake triggers are a **Steam
    press+release (report `0x40`) on its own interface (`wakeNudgeTask` in `puck_hid.cpp`). The nudge exists
    because some hosts ignore a bare resume signal unless real keyboard/mouse input follows it; it can't be
    sent *during* suspend (reports can't cross a suspended bus), so it's delivered immediately after resume.
+
+The wake-armed state is visible on the board LED: a short blip every ~2 s while the host is suspended, dark in
+normal operation (`status_led.cpp`).
 
 Every mode advertises the remote-wakeup capability in its config descriptor, so the device is always *armed*.
 The catch is that a host only *honors* a resume from an allow-listed input device class (HID keyboard/mouse) —

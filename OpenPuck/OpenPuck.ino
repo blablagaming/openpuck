@@ -30,6 +30,7 @@ using namespace Adafruit_LittleFS_Namespace;
 #include "webusb_config.h"
 #include "serial_console.h"
 #include "wake_hid.h"
+#include "status_led.h"
 
 #if CFG_TUD_HID < 4
 #error "build with -DCFG_TUD_HID=4 (extra_flags): up to 4 HID interfaces per mode"
@@ -39,6 +40,7 @@ static uint8_t g_usbCfgDesc[512];   // puck composite (4 HID + WebUSB) exceeds t
 
 void setup() {
   genSerial();
+  ledInit();
   rfGenSessionAddr();   // per-device unique RF session address (advertised in the host frame; isolates pucks)
   InternalFS.begin();
   loadCfg(); g_xbox = !modeIsPuck(g_usbMode);   // load persisted config + decide USB presentation BEFORE registering interfaces
@@ -103,4 +105,5 @@ void loop() {
   rfDiagTask();                     // service whichever RF RE/calibration mode is active (no-op in normal use)
   rfLinkTask();                     // host-frame beacons + connected-mode poll (decodes input -> g_in -> active controller) + QoS + stats
   hapticTask();                     // reconnect-block edge handling + steam 0x82 quiet timeout
+  ledTask();                        // blip the LED while wake is armed (host suspended)
 }

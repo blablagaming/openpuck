@@ -211,14 +211,13 @@ Waking the host is an **explicit gesture, never a side effect of input**. While 
 personality sends *nothing* (no `0x45` forwards, no lizard mouse/keyboard, no periodic `0x79`/`0x7B` status) —
 a suspended-bus `sendReport` can itself translate into a host wake, which made the PC wake on any trackpad
 graze and nearly impossible to keep asleep. The only wake triggers are a **Steam-button short press** or a
-**controller connect**, detected in `rf_link.cpp` (guarded by `USBDevice.suspended()`). Each fires two things:
+**controller connect**, detected in `rf_link.cpp` (guarded by `USBDevice.suspended()`), which call
+`USBDevice.remoteWakeup()` — the device-level USB resume signal.
 
-1. `USBDevice.remoteWakeup()` — the device-level USB resume signal; and
-2. `g_active->wakeEvent()` — the controller queues a **wake nudge**: once the bus has resumed, the puck
-   personality sends a deliberate space-bar press+release (keyboard report `0x41`) and a mouse click
-   press+release (report `0x40`) on its own interface (`wakeNudgeTask` in `puck_hid.cpp`). The nudge exists
-   because some hosts ignore a bare resume signal unless real keyboard/mouse input follows it; it can't be
-   sent *during* suspend (reports can't cross a suspended bus), so it's delivered immediately after resume.
+(An earlier build also injected a post-resume "nudge" — a synthetic space-bar + mouse click on the puck's own
+HID reports — on the theory that some hosts ignore a bare resume. It was removed: once the wake-mouse interface
+gave the device a wait-wake-armed `mouhid` function the resume alone is honored, and the synthetic input had
+side effects on the host, e.g. landing on the desktop/taskbar after wake and launching apps.)
 
 The two board LEDs are a status + wake debugger (`status_led.cpp`, PWM-dimmed): **blue dim** = awake; **red dim
 blink (~2s)** = host asleep and we're armed to wake it; **blue bright flash** = a `remoteWakeup()` was just

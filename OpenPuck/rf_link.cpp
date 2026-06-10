@@ -156,7 +156,6 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen){
                 if(steamNow && !steamWasDown) steamDownMs=millis();                                                            // rising edge: record press time
                 if(!steamNow && steamWasDown && millis()-steamDownMs<1000u && USBDevice.suspended()){                          // falling edge within 1 s -> short press -> wake
                   USBDevice.remoteWakeup(); ledWakePulse();
-                  if(g_active) g_active->wakeEvent();   // queue the post-resume input nudge (space+click on puck modes)
                 }
                 steamWasDown=steamNow;
               }
@@ -255,7 +254,6 @@ void rfLinkTask(){
     bool nowRfConn=(g_connSlot>=0 && millis()-g_connReplyMs<300);
     if(nowRfConn && !wasRfConn && USBDevice.suspended()){
       USBDevice.remoteWakeup(); ledWakePulse();
-      if(g_active) g_active->wakeEvent();   // queue the post-resume input nudge (space+click on puck modes)
     }
     wasRfConn=nowRfConn;
   }

@@ -86,7 +86,7 @@ just points at the `OpenPuck` directory). Modules are layered low → high:
 | `webusb_config.{h,cpp}` | The WebUSB binary config channel for the browser panel. |
 | `serial_console.{h,cpp}` | The CDC single-letter debug command line. |
 | `wake_hid.{h,cpp}` | A boot-mouse HID interface added to the clean controller modes so the host honors USB remote-wakeup (see "Wake from sleep"). |
-| `status_led.{h,cpp}` | Wake-sent LED indicator: dark in all steady states; flashes 500 ms at each `remoteWakeup()`. Drives both the Feather user LED (P1.15) and the SuperMini clone's blue LED (P0.15); pins/polarity overridable. |
+| `status_led.{h,cpp}` | Two-LED status (PWM-dimmed): blue dim = awake, red dim blink = asleep/wake-armed, blue bright flash = wake sent. Pins/levels/polarity overridable (defaults guess the SuperMini clone). |
 
 ## The controller abstraction
 
@@ -220,10 +220,11 @@ graze and nearly impossible to keep asleep. The only wake triggers are a **Steam
    because some hosts ignore a bare resume signal unless real keyboard/mouse input follows it; it can't be
    sent *during* suspend (reports can't cross a suspended bus), so it's delivered immediately after resume.
 
-The board LED is a wake debugger (`status_led.cpp`): dark in all steady states (including while armed), and a
-500 ms flash at the moment a `remoteWakeup()` is actually sent. Flash + host stays asleep = the resume was sent
-and the host ignored it (fix host-side, e.g. `powercfg /deviceenablewake`); no flash = the firmware never fired
-(it didn't see the gesture, or didn't consider the bus suspended). USB remote wakeup is a **device-level**
+The two board LEDs are a status + wake debugger (`status_led.cpp`, PWM-dimmed): **blue dim** = awake; **red dim
+blink (~2s)** = host asleep and we're armed to wake it; **blue bright flash** = a `remoteWakeup()` was just
+sent. Blue flash + host stays asleep = the resume was sent and the host ignored it (host-side fix, e.g.
+`powercfg /deviceenablewake`, or a missing wake-capable function — see below); no flash on a wake gesture = the
+firmware never fired (didn't see the gesture, or didn't consider the bus suspended). USB remote wakeup is a **device-level**
 signal — one wake line per device, armed by a single `SET_FEATURE(DEVICE_REMOTE_WAKEUP)`; there is no
 per-interface arming on the wire. Which Windows device *node* gets credited is host-internal policy.
 

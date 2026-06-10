@@ -173,11 +173,10 @@ void SteamPuckController::begin(){
 // Forward the controller's report 0x45 to Steam, or drive lizard kb/mouse when Steam is closed. This is a
 // PURELY USB-SIDE decision -- it changes nothing about the RF poll or the host->controller relay.
 void SteamPuckController::onReport45(const uint8_t* rep, bool fresh, uint8_t bodyTlen){
-  // Host asleep -> forward NOTHING automatically. While suspended, every sendReport attempt (lizard mouse from
-  // a trackpad graze, 0x45 forwards) can translate into a host wake -- which made the PC wake on any controller
-  // movement and nearly impossible to keep asleep. Waking is an explicit gesture only: rf_link fires
-  // wakeEvent() (Steam-button short press / controller connect), and task() delivers a deliberate space+click
-  // nudge after the bus resumes.
+  // Host asleep -> forward NOTHING. While suspended, every sendReport attempt (a lizard-mouse report from a
+  // trackpad graze, a 0x45 forward) can translate into a host wake -- which made the PC wake on any controller
+  // movement and nearly impossible to keep asleep. Waking is an explicit gesture only (Steam-button short press
+  // / controller connect), handled in rf_link.cpp via the device-level USB resume signal.
   if (USBDevice.suspended()) return;
   if (g_connSlot < 0 || g_connSlot >= NSLOT) return;
   if (lizardActive()){
@@ -192,38 +191,10 @@ void SteamPuckController::onReport45(const uint8_t* rep, bool fresh, uint8_t bod
   }
 }
 
-// ---- wake nudge: a deliberate space-bar press + mouse click on the puck's OWN kb/mouse reports (0x41/0x40),
-// delivered right after the bus resumes. The resume signal alone is ignored by some hosts unless real input
-// from a keyboard/mouse-class device follows; this provides it. Queued by wakeEvent() (called from rf_link on
-// a Steam-button short press or a controller connect while suspended); stepped here at ~15ms per phase.
-static uint8_t       g_nudgeStep = 0;      // 0=idle, 1=space down, 2=space up, 3=click down, 4=click up
-static unsigned long g_nudgeMs = 0;
-void SteamPuckController::wakeEvent(){
-  g_nudgeStep = 1; g_nudgeMs = millis();
-}
-static void wakeNudgeTask(){
-  if(!g_nudgeStep) return;
-  if(millis()-g_nudgeMs > 5000){ g_nudgeStep=0; return; }            // bus never resumed -> drop the nudge
-  if(USBDevice.suspended()) return;                                   // wait for resume; reports can't cross a suspended bus
-  if(g_connSlot<0 || g_connSlot>=NSLOT || !hid[g_connSlot].ready()) return;
-  static unsigned long stepMs=0;
-  if(millis()-stepMs < 15) return;                                    // pace the press/release edges
-  stepMs=millis();
-  switch(g_nudgeStep){
-    case 1: { uint8_t k[8]={0,0,HID_KEY_SPACE,0,0,0,0,0}; hid[g_connSlot].sendReport(0x41,k,8); break; }
-    case 2: { uint8_t k[8]={0,0,0,0,0,0,0,0};             hid[g_connSlot].sendReport(0x41,k,8); break; }
-    case 3: case 4: {
-      hid_mouse_report_t m; m.buttons=(g_nudgeStep==3)?1:0; m.x=0; m.y=0; m.wheel=0; m.pan=0;
-      hid[g_connSlot].sendReport(0x40,&m,sizeof m); break; }
-  }
-  g_nudgeStep = (g_nudgeStep>=4) ? 0 : (uint8_t)(g_nudgeStep+1);
-}
-
 // USB connection presentation (like the real dongle): report 0x79 = connection state (01=disc, 02=conn),
 // edge-triggered, + periodic 0x7B status. Live-captured: this is what Steam reads to mark the controller
 // connected. Without it Steam shows disconnected even though 0x45 input is streaming.
 void SteamPuckController::task(){
-  wakeNudgeTask();
   if (USBDevice.suspended()) return;   // no periodic 0x79/0x7B while the host sleeps -- those sends can wake it too
   static bool usbConn=false; static unsigned long last79=0, last7B=0;
   bool conn = (g_connSlot>=0 && millis()-g_connReplyMs < 300);

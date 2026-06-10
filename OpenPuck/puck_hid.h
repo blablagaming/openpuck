@@ -22,7 +22,6 @@ public:
   void begin() override;
   void onReport45(const uint8_t* rep, bool fresh, uint8_t bodyTlen) override;
   void task() override;
-  void wakeEvent() override;   // queue the space+click wake nudge (delivered by task() once the bus resumes)
   bool isPuck() const override { return true; }
 };
 extern SteamPuckController g_steamPuck;

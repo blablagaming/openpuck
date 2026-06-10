@@ -10,10 +10,6 @@
 //                    modes (Xbox, puck/lizard) build + send their host report here. STREAM-style modes ignore
 //                    it and instead emit at a fixed cadence from task(); they read the decoded g_in directly.
 //   task()        -- called every loop(): streaming emit, handshake/subcommand draining, mode-specific upkeep.
-//   wakeEvent()   -- called from rf_link.cpp when a deliberate wake gesture fires while the host is suspended
-//                    (Steam-button short press, or controller connect). The device-level resume signal
-//                    (USBDevice.remoteWakeup) has already been sent; a controller can additionally queue a
-//                    host-visible input nudge to deliver once the bus resumes (see puck_hid.cpp).
 //   isPuck()      -- true for Steam/Lizard (keep the boot CDC composite; different USB lifecycle in setup()).
 //
 // To add a new controller: implement IController in a new mode_*.cpp, give it a singleton, and wire it into
@@ -27,7 +23,6 @@ public:
   virtual void begin() = 0;
   virtual void onReport45(const uint8_t* rep, bool fresh, uint8_t bodyTlen) { (void)rep; (void)fresh; (void)bodyTlen; }
   virtual void task() {}
-  virtual void wakeEvent() {}
   virtual bool isPuck() const { return false; }
 };
 

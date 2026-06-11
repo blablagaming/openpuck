@@ -28,6 +28,7 @@ static uint16_t codeToSwitch(uint8_t c, uint16_t fA,uint16_t fB,uint16_t fX,uint
     case 5:return 0x10; case 6:return 0x20; case 7:return 0x400; case 8:return 0x800;
     case 9:return 0x100; case 10:return 0x200; case 11:return 0x1000; default:return 0; }
 }
+// Back-paddle code 12..15 map to D-pad Up/Down/Left/Right; fold them into the hat direction flags.
 static inline void backCodeToHatDirs(uint8_t c, bool& u, bool& d, bool& l, bool& r){
   if(c==12) u=true;
   else if(c==13) d=true;

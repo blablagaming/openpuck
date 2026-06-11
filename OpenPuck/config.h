@@ -48,6 +48,12 @@ extern uint8_t g_back[4];       // back paddles L4,R4,L5,R5 -> button codes (5=L
 #define USB_STREAM_MS   4u      // host-side HID stream cadence for translated modes (~250 Hz)
 extern const uint32_t g_pollUs; // RF poll cadence (us). FIXED -- not configurable (see loadCfg).
 
+// loop-timing diagnostics (defined in OpenPuck.ino) -- surfaced in the WebUSB status blob to find what caps
+// the poll rate: avg loop period, slowest section index, and that section's avg us/iteration.
+extern uint16_t g_loopPeriodUs;
+extern uint8_t  g_loopWorst;
+extern uint16_t g_loopWorstUs;
+
 void loadCfg();
 void saveCfg();
 // Mode switch (chord / WebUI): persist mode if the toggle is on, else arm a one-shot so this reboot lands in

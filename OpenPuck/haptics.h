@@ -31,6 +31,10 @@
 #define HAPTIC_STOP_BURST  4u
 // max relayed payload bytes per entry: RF frame = [E3][len][05][rid][payload] and MAXLEN=64 -> 60
 #define RELAY_MAXP 60u
+// Proactive post-(re)connect haptic re-init: this many shots, this far apart, starting ~200ms after the link
+// comes up -- covers ~0.2s..3s so the brief controller-side connect buzz gets reset before it can sustain.
+#define HAPTIC_REINIT_SHOTS  8u
+#define HAPTIC_REINIT_GAP_MS 350u
 
 // ---- relay queue (written by puck_hid.cpp, mode_xinput.cpp, serial_console.cpp; drained by rf_link.cpp) ----
 // Enqueue one host->controller report: rid = report/command id, payload = the bytes AFTER [cmd][len] (what

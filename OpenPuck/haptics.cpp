@@ -197,9 +197,13 @@ void hapticOnReconnect(){
   g_hapticBlockUntil = millis() + HAPTIC_RECONNECT_BLOCK_MS;   // no haptics relayed for the next 3s
   g_haptic82On = false;
   hapticCancelPendingOn();                                     // drop any haptic ON queued before the link came up
-  g_reinitAt = millis() + HAPTIC_RECONNECT_BLOCK_MS + 200u;    // first re-init just after the block, on the settled link
-  g_reinitLeft = 2;                                           // ...then a 2nd ~2s later: the connect buzz can latch
-                                                              // anytime in the first few seconds, after a single shot
+  // Be PROACTIVE: start re-initing the haptic engine right after the link is up and repeat across the whole
+  // settle window, instead of waiting for the block to end. The brief connect buzz engages early (during the
+  // block, controller-internal), so a single late shot misses it -- frequent early resets cut it short or
+  // preempt it. The re-init is settings only (no haptic play), and Steam haptics are blocked the whole time,
+  // so repeating it can't itself buzz.
+  g_reinitAt = millis() + 200u;                               // first reset ~200ms after (re)connect
+  g_reinitLeft = HAPTIC_REINIT_SHOTS;                          // then every HAPTIC_REINIT_GAP_MS across the window
   uint8_t mk=2; hapLogAdd(0xFD, 0xEE, &mk, 1);                 // capture marker: RECONNECT detected (block+reinit armed)
 }
 void hapticTask(){
@@ -210,9 +214,9 @@ void hapticTask(){
   if(up && !wasHapticLinkUp){ uint8_t mk=1; hapLogAdd(0xFD,0xEE,&mk,1); hapticOnReconnect(); }
   if(!up && wasHapticLinkUp){ uint8_t mk=0; hapLogAdd(0xFD,0xEE,&mk,1); }
   wasHapticLinkUp=up;
-  if(g_reinitAt && up && (int32_t)(millis()-g_reinitAt) >= 0){   // clear reconnect-stuck haptics (a couple of shots)
+  if(g_reinitAt && up && (int32_t)(millis()-g_reinitAt) >= 0){   // proactive haptic re-init across the connect window
     hapticReinit();
-    g_reinitAt = (g_reinitLeft && --g_reinitLeft) ? (millis()+2000u) : 0;
+    g_reinitAt = (g_reinitLeft && --g_reinitLeft) ? (millis()+HAPTIC_REINIT_GAP_MS) : 0;
   }
   // Steam-mode: host went quiet -> mark the 0x82 stream inactive. Do NOT synthesize a stop: trackpad haptics
   // are one-shot pulses, so firing a 0x82-zero ~HAPTIC_QUIET_MS after a swipe ends is the extra end-of-movement

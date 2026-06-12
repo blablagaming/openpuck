@@ -88,6 +88,7 @@
         <div class="stat logonly"><div class="k">Loop period</div><div class="v" id="stLoop">—</div></div>
         <div class="stat logonly"><div class="k">Slowest stage</div><div class="v" id="stWorst">—</div></div>
         <div class="stat logonly"><div class="k">Poll period act/want</div><div class="v" id="stPollPer">—</div></div>
+        <div class="stat"><div class="k">Build (git)</div><div class="v" id="stBuild">—</div></div>
       </div>
       <p class="note logonly">Polls/s ≈ 250 expected; it's capped by Loop period (≈4000 µs needed). "Slowest stage" is the loop section eating the most time per iteration.</p>
       <div class="row" style="margin:10px 0 0"><button id="hapClear">Clear stuck buzz</button>
@@ -241,6 +242,13 @@ function applyBlob(p){
   $("#stLoop").textContent = loopUs? loopUs+" µs" : "—";
   $("#stWorst").textContent = loopUs? (WORST[worstIdx]||worstIdx)+" "+worstUs+"µs" : "—";
   $("#stPollPer").textContent = up? (pollUs+" / "+pollIntended+" µs") : "—";
+  // build provenance (protocol v4+): dirty flag at p[38], 12-byte NUL-padded git hash at p[39..50]. Independent
+  // of link state. Older firmware sends a shorter blob -> stays "—".
+  const gitDirty=(p.length>38?p[38]:0); let gitHash="";
+  for(let i=39;i<51 && i<p.length && p[i];i++) gitHash+=String.fromCharCode(p[i]);
+  $("#stBuild").innerHTML = gitHash
+    ? (gitHash + (gitDirty ? ' <span class="pill dn">dirty</span>' : ' <span class="pill up">clean</span>'))
+    : "—";
   // sliders (only if not being dragged)
   setSlider("mDiv",mDiv); setSlider("mFric",mFric);
   $("#abSwap").textContent = abSwap? "on":"off"; $("#abSwap").classList.toggle("active",!!abSwap);

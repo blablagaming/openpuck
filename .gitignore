@@ -6,3 +6,6 @@ tmp/
 # pairtui helper binary (build from scmd.c: clang -framework IOKit -framework CoreFoundation -o scmd scmd.c)
 pairtui/scmd
 __pycache__/
+
+# generated build-provenance header (gen_version.sh); never commit
+OpenPuck/git_version.h

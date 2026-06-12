@@ -4,6 +4,7 @@
 #include "rf_link.h"
 #include "haptics.h"
 #include "puck_hid.h"
+#include "build_info.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -14,13 +15,14 @@ Adafruit_USBD_WebUSB usb_web;
 //                [qos][persistMode][chordBtn B][chordBtn X][chordBtn Y][pollsps_lo][pollsps_hi]
 //                [loopPeriod_lo][loopPeriod_hi][loopWorstIdx][loopWorstUs_lo][loopWorstUs_hi]
 //                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
-#define WB_PAYLEN 38
+//                [gitDirty][gitHash 12B ASCII, NUL-padded]
+#define WB_PAYLEN 51
 static void webusbSendBlob(){
   if(!usb_web.connected()) return;
   bool up = (g_connSlot>=0 && (millis()-g_connReplyMs) < 300);
   uint8_t p[2+WB_PAYLEN];
   p[0]=0xA5; p[1]=WB_PAYLEN;
-  p[2]=3;                          // protocol version (3 = +battery/rssi at [38][39])
+  p[2]=4;                          // protocol version (4 = +git build provenance at [40..52]; 3 = battery/rssi)
   p[3]=g_usbMode; p[4]=(uint8_t)g_mDiv; p[5]=(uint8_t)g_mFric; p[6]=0 /*rsvd: ex-padSmooth*/; p[7]=g_abSwap;
   p[8]=g_back[0]; p[9]=g_back[1]; p[10]=g_back[2]; p[11]=g_back[3];
   p[12]=(g_connSlot>=0)?(uint8_t)g_connSlot:0xFF;
@@ -38,6 +40,12 @@ static void webusbSendBlob(){
   p[37]=OPK_LOG;                                                       // logging build? panel shows/hides its log UI
   p[38]=g_battery;                                                     // controller battery % (report 0x43); 0=unknown
   p[39]=g_linkRssi;                                                    // RAW signal strength |dBm| (0=no sample)
+  // Build provenance: which git commit this firmware was built from, and whether the tree was dirty. Lets the
+  // panel confirm exactly what's flashed. Injected at build time (build_info.h / gen_version.sh); "unknown" if
+  // the version header wasn't generated.
+  p[40]=OPK_GIT_DIRTY ? 1 : 0;
+  memset(&p[41],0,12);                                                 // 12B ASCII git hash, NUL-padded
+  { const char* h=OPK_GIT_HASH; for(uint8_t i=0;i<12 && h[i];i++) p[41+i]=(uint8_t)h[i]; }
   usb_web.write(p,sizeof p); usb_web.flush();
 }
 #if OPK_LOG

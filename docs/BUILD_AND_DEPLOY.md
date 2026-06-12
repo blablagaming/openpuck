@@ -47,10 +47,13 @@ arduino-cli core install adafruit:nrf52 --additional-urls https://adafruit.githu
 From the repository root:
 
 ```bash
+./gen_version.sh   # optional: stamp the build with the current git hash + dirty flag (shown in the panel)
 arduino-cli compile -b adafruit:nrf52:feather52840 --build-property "build.extra_flags=-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=4" OpenPuck
 ```
 
 This sketch requires `CFG_TUD_HID=4` because Steam mode exposes four HID interfaces.
+
+**Build provenance.** `gen_version.sh` writes `OpenPuck/git_version.h` with the current commit's short hash and a dirty flag (1 if the working tree has any tracked change or untracked file). The firmware bakes these in and reports them over WebUSB, so the panel's **Build (git)** field shows exactly which commit is flashed and whether it was a clean checkout — handy for confirming what's on a board. The header is git-ignored; if you skip the script the build still succeeds and the panel shows `unknown`. You can also inject the values directly instead of using the script, e.g. append ``-DOPK_GIT_HASH=\"$(git rev-parse --short=8 HEAD)\" -DOPK_GIT_DIRTY=0`` to `build.extra_flags`.
 
 ## 5. Upload the firmware
 

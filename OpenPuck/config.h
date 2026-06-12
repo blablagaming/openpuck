@@ -16,6 +16,16 @@
 #define OPK_LOG 0
 #endif
 
+// Build-time FACTORY RESET. 0 (default) = normal. Build with -DOPK_FACTORY_RESET=1 to produce a firmware that
+// reformats ALL persistent storage (cfg.bin + bonds.bin) on EVERY boot, before anything is loaded -- so flashing
+// this build wipes the board to clean defaults. It keeps wiping each boot while the flag is compiled in, so the
+// intended workflow is: flash the reset build once, let it boot (storage erased), then flash a normal build for
+// regular use. Equivalent to the serial "ERASE-ALL" / WebUSB "Factory erase" actions, but at flash time and
+// without needing a console or the panel. Re-pair the controller afterwards.
+#ifndef OPK_FACTORY_RESET
+#define OPK_FACTORY_RESET 0
+#endif
+
 // ---- USB presentation modes (g_usbMode). RF poll/relay is identical across all; only USB enumeration +
 //      report mapping differ. ----
 #define MODE_STEAM   0   // Valve puck; auto-lizard when Steam closed

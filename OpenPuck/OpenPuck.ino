@@ -43,6 +43,11 @@ void setup() {
   ledInit();
   rfGenSessionAddr();   // per-device unique RF session address (advertised in the host frame; isolates pucks)
   InternalFS.begin();
+#if OPK_FACTORY_RESET
+  // Build-time wipe (-DOPK_FACTORY_RESET=1): reformat ALL persistent storage before it is read, so flashing this
+  // build comes up on clean defaults. Re-flash a normal build for regular use (this wipes on every boot). See config.h.
+  factoryErase(); InternalFS.begin();
+#endif
   loadCfg(); g_xbox = !modeIsPuck(g_usbMode);   // load persisted config + decide USB presentation BEFORE registering interfaces
   g_active = controllerFor(g_usbMode);
 

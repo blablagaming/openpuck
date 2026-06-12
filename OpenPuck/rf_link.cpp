@@ -40,6 +40,8 @@ uint16_t g_pollsps = 0;   // polls/s (GET+relay TXs) last second -- distinguishe
 uint16_t g_pollPeriodUs = 0;   // MEASURED avg us between GET-poll fires (vs intended g_pollUs) -- ground truth
 static uint32_t g_pollDtSum = 0; static uint16_t g_pollDtCnt = 0;
 volatile uint8_t g_linkRssi = 0;   // smoothed |dBm| of the controller's replies (0 = none yet)
+volatile uint8_t g_ctlrStatus[8] = {0};   // last F1 type-2 control/status TLV from the controller (battery/flags live here)
+volatile uint8_t g_ctlrStatusLen = 0;
 
 // ---- internal counters / timers ----
 static uint8_t  g_e3pid = 0;
@@ -196,6 +198,16 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen, u
             // g_in); PUSH modes (Xbox, puck/lizard) build + send their host report here.
             if(g_active) g_active->onReport45(rep, fresh, tlen);
             lastRep=rep; lastTlen=tlen;
+          }
+          else if((ttype==2 || ttype==4) && (size_t)(idx+2)+tlen<=sizeof(rfrx)){
+            // The controller's F1 reply also carries NON-input TLVs that OpenPuck used to discard: type 2 = the
+            // 4-byte control/status field (battery / charge / flags), type 4 = bulk. Battery is in here -- the
+            // puck forwards it to Steam in report 0x7B (OpenPuck currently hardcodes that -> always "full").
+            // Capture them (slot 0xFB) so we can identify the battery byte, and stash type-2 for wiring 0x7B.
+            const uint8_t* v=&rfrx[idx+2];
+            if(ttype==2){ uint8_t m=tlen>8?8:tlen; for(uint8_t i=0;i<m;i++) g_ctlrStatus[i]=v[i]; g_ctlrStatusLen=m; }
+            hapLogAdd(0xFB, ttype, v, tlen);
+            if(g_connVerbose && Serial.availableForWrite()>50){ Serial.printf("  F1.t%u n%u:",ttype,tlen); for(uint8_t i=0;i<tlen && i<16;i++)Serial.printf(" %02X",v[i]); Serial.println(); }
           }
           idx+=tlen+2;
         }

@@ -39,6 +39,17 @@
 // during use (a buzz that starts seconds after connect and won't self-clear). Long enough not to fire between
 // rapid in-game haptics; short enough to clear a stuck buzz soon after the user pauses.
 #define HAPTIC_CLEAR_IDLE_MS 1200u
+// "Clear stuck buzz" FLOOD: replay the haptic re-init at this cadence (100ms = 10Hz) for a bounded window. A
+// single re-init doesn't always shift a stubborn latch; hammering it at 10Hz does. The re-init is settings-only
+// (no haptic play, no LED), so flooding it can't itself buzz or flicker. The flood is armed for HAPTIC_FLOOD_MS
+// (30s) at boot and again on every (re)connect -- so the first 30s after the controller connects (when the
+// connect-buzz engages) get hammered automatically -- then it stops. The WebUSB panel (op 0x07) re-arms the
+// same 30s window on demand, for a buzz that shows up later. Gated on link-up so it doesn't churn while down.
+#define HAPTIC_FLOOD_GAP_MS 100u
+#define HAPTIC_FLOOD_MS     30000u
+// Controller power-off: hapticSendShutdown() relays Steam's confirmed "turn off controller" command (feature-0x01
+// cmd 0x9F, payload "off!" -- captured from the real puck). Sent as a small burst because the RF relay is NO-ACK.
+#define HAPTIC_SHUTDOWN_SHOTS 3u
 
 // ---- relay queue (written by puck_hid.cpp, mode_xinput.cpp, serial_console.cpp; drained by rf_link.cpp) ----
 // Enqueue one host->controller report: rid = report/command id, payload = the bytes AFTER [cmd][len] (what
@@ -49,7 +60,10 @@ extern uint8_t          g_relayOp;   // relay frame opcode (E3 poll)
 extern uint8_t          g_relaySub;  // relay sub-TLV type byte = SET
 extern volatile uint8_t g_testHaptic;// 't<n>' injects n test haptics for the buzz hunt
 extern volatile uint8_t g_hapticStop;// pending haptic-STOP frames to relay (kill a latched whine)
+extern unsigned long    g_buzzFloodUntil; // re-init flood active while millis() < this (armed: boot/connect/panel)
 extern unsigned long    g_hapticBlockUntil;
+void hapticArmBuzzFlood();           // (re)arm the 10Hz buzz-clear flood for HAPTIC_FLOOD_MS
+void hapticSendShutdown();           // relay the controller power-off (0x9F "off!"), burst x3 (host-suspend / Steam 0x9F / test button)
 
 // ---- diagnostic capture (compiled in only when OPK_LOG): a ring of recent host->controller commands +
 //      link/TX markers, dumped over WebUSB. No-ops in a production build so call sites vanish. ----

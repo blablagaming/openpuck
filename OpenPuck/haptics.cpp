@@ -2,15 +2,29 @@
 #include "bonds.h"
 #include "config.h"
 #include "rf_link.h"
+#include <Adafruit_TinyUSB.h>   // USBDevice.suspended() -> autonomous controller power-off on host sleep
 #include <Arduino.h>
 #include <string.h>
 
 uint8_t          g_relayOp  = 0xE3;   // E3 poll
-// relay sub-TLV type byte = SET (confirmed on hardware: E3 + [len][05][rid][payload] makes the controller act
-// on it -- haptics buzz + lizard-off lands). GET is 01.
-uint8_t          g_relaySub = 0x05;
+// relay sub-TLV TYPE byte. CONFIRMED from a real puck<->controller sniff: the puck wraps every host command as
+// E3 + [tlvlen][01][rid][innerlen][data] -- type 0x01 (same type as the GET poll's [01][45]; the rid selects
+// the action). The old 0x05 was wrong and, with the dropped innerlen byte, every relayed command was discarded.
+uint8_t          g_relaySub = 0x01;
 volatile uint8_t g_testHaptic = 0;
 volatile uint8_t g_hapticStop = 0;
+unsigned long    g_buzzFloodUntil = 0;   // 10Hz re-init flood active while millis() < this; armed boot/connect/panel
+
+void hapticArmBuzzFlood(){ g_buzzFloodUntil = millis() + HAPTIC_FLOOD_MS; }
+// Controller power-off. CONFIRMED from a real Windows USB capture of the Valve puck (shutoff.pcapng): Steam's
+// "turn off controller" is the single feature-0x01 command 0x9F with payload ASCII "off!" (6F 66 66 21). The
+// PROTEUS dongle forwards host feature reports to the controller verbatim as SET_FR (esb.json host_usb_bridge),
+// so the controller acts on report 0x9F directly -- we relay it the same way (E3 SET sub-TLV). The wire relay is
+// NO-ACK, so send a small burst: a single lost frame must not leave the controller on.
+void hapticSendShutdown(){
+  static const uint8_t OFF[4] = {0x6f,0x66,0x66,0x21};   // "off!"
+  for (uint8_t i=0; i<HAPTIC_SHUTDOWN_SHOTS; i++) relayEnqueue(0x9F, OFF, sizeof OFF);
+}
 unsigned long    g_hapticBlockUntil = 0;   // drop Steam haptics briefly during reconnect settle
 
 static unsigned long g_haptic82Ms = 0;     // millis of last 0x82 haptic OUTPUT relayed (Steam mode)
@@ -113,7 +127,7 @@ static bool haptic82PayloadOn(const uint8_t* p, uint16_t n){
   for(uint16_t i=2;i<n;i++) if(p[i]) return true;   // observed form is [01 01 gain], but treat any trailing non-zero as active
   return false;
 }
-static void hapticCancelPendingOn(){   // void queued 0x82-ON entries (stale Steam haptics across a reconnect)
+static void hapticCancelPendingOn(){   // void queued 0x82-ON + 0x9F-shutdown entries (stale across a reconnect)
   uint32_t pm = __get_PRIMASK(); __disable_irq();
   for(uint8_t i=g_rqTail; i!=g_rqHead; i=rqNext(i)){
     RelayMsg &m = g_rq[i];
@@ -147,15 +161,28 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1){
     RelayMsg &m = g_rq[g_rqTail];
     if(m.rid){                          // rid 0 = entry voided by hapticCancelPendingOn -> skip, take the next
       uint8_t rl = m.len; if(rl > RELAY_MAXP) rl = RELAY_MAXP;
-      uint8_t p[4+RELAY_MAXP]; p[0]=g_relayOp; p[1]=(uint8_t)(1+rl); p[2]=g_relaySub; p[3]=m.rid;
-      memcpy(p+4, m.data, rl);
+      // On-air sub-TLV format -- CONFIRMED from real puck<->controller sniffs (puck_sniffer). The TYPE byte and
+      // framing differ by report CLASS:
+      //   * actuators / haptics 0x80-0x86  ->  E3 [1+rl][05][rid][data]            (type 05, NO inner-len)
+      //         e.g. haptic on  = e3 04 05 82 01 01 f7
+      //   * config / settings / LED 0x87+  ->  E3 [2+rl][01][rid][innerlen][data]  (type 01, KEEPS the len byte)
+      //         e.g. brightness  = e3 05 01 87 03 2d 63 00 ,  LED = e3 12 01 c1 10 ...
+      // (Earlier OpenPuck sent type 05 + no inner-len for EVERYTHING: haptics worked but every 0x87+ command was
+      // discarded -- the controller read data[0] as the length. A later all-01 attempt fixed those but broke the
+      // 0x82 haptics. Splitting on 0x87 is what the real puck actually does.)
+      uint8_t p[5+RELAY_MAXP], plen;
+      if (m.rid >= 0x87){
+        p[0]=g_relayOp; p[1]=(uint8_t)(2+rl); p[2]=0x01; p[3]=m.rid; p[4]=rl; memcpy(p+5, m.data, rl); plen=(uint8_t)(5+rl);
+      } else {
+        p[0]=g_relayOp; p[1]=(uint8_t)(1+rl); p[2]=0x05; p[3]=m.rid;          memcpy(p+4, m.data, rl); plen=(uint8_t)(4+rl);
+      }
       hapLogAdd(0xFE, m.rid, m.data, rl);   // log what we actually TX to the controller (slot 0xFE) for the buzz hunt
       g_rqTail = rqNext(g_rqTail);      // copied out -> release the slot before the TX
       // s1 carries a PID distinct from the GET poll that follows (caller cycles it), so the controller's ESB
       // dedup never mistakes the GET for a retransmit of this relay. 80us RX window: the relay is NO-ACK, the
       // controller sends nothing back, so don't burn the full ~1.2ms reply window (that was halving the poll
       // rate during haptics).
-      rfConnTx(ch,s1,p,(uint8_t)(4+rl),80);
+      rfConnTx(ch,s1,p,plen,80);
       return;                           // ONE relay per poll cycle (matches the real puck's pacing)
     }
     g_rqTail = rqNext(g_rqTail);
@@ -188,6 +215,7 @@ void hapticReinit(){
 }
 void hapticInit(){
   g_rqHead = g_rqTail = 0; g_haptic82On=false;
+  hapticArmBuzzFlood();   // flood the buzz-clear for the first HAPTIC_FLOOD_MS (re-armed on each connect below)
   g_hapticBlockUntil = millis() + HAPTIC_RECONNECT_BLOCK_MS;   // boot: block stale Steam 0x82 until link stable
   // NO fabricated stop burst. USB capture proves Steam only ever sends 0x82 [01 01 f7] pulses -- never a
   // zero-gain [01 01 00] "stop". Injecting our invented stop frame (which the real puck never sends) at
@@ -210,6 +238,7 @@ void hapticOnReconnect(){
   // so repeating it can't itself buzz.
   g_reinitAt = millis() + 200u;                               // first reset ~200ms after (re)connect
   g_reinitLeft = HAPTIC_REINIT_SHOTS;                          // then every HAPTIC_REINIT_GAP_MS across the window
+  hapticArmBuzzFlood();                                        // and hammer the buzz-clear at 10Hz for the next 30s
   uint8_t mk=2; hapLogAdd(0xFD, 0xEE, &mk, 1);                 // capture marker: RECONNECT detected (block+reinit armed)
 }
 void hapticTask(){
@@ -224,6 +253,16 @@ void hapticTask(){
     hapticReinit();
     g_reinitAt = (g_reinitLeft && --g_reinitLeft) ? (millis()+HAPTIC_REINIT_GAP_MS) : 0;
   }
+  // Buzz-clear FLOOD: while the armed window is open (boot/connect/panel -> g_buzzFloodUntil) and the link is up,
+  // replay the re-init every HAPTIC_FLOOD_GAP_MS (10Hz) to hammer a stubborn latch a single re-init won't shift.
+  // Auto-stops when the 30s window elapses; re-arm from the WebUSB panel. Gated on link-up (no churn while down).
+  static unsigned long floodMs=0;
+  if ((int32_t)(g_buzzFloodUntil - millis()) > 0 && up && millis()-floodMs >= HAPTIC_FLOOD_GAP_MS){ floodMs=millis(); hapticReinit(); }
+  // Controller power-off on host sleep: send the power-off command (0x9F "off!") the instant the USB bus
+  // suspends, like the real puck. wasSusp starts true so a boot-into-suspended state never false-fires.
+  static bool wasSusp=true; bool susp=USBDevice.suspended();
+  if (susp && !wasSusp) hapticSendShutdown();
+  wasSusp=susp;
   // Steam-mode: host went quiet -> mark the 0x82 stream inactive. Do NOT synthesize a stop: trackpad haptics
   // are one-shot pulses, so firing a 0x82-zero ~HAPTIC_QUIET_MS after a swipe ends is the extra end-of-movement
   // click the real puck doesn't make. Steam forwards its own stop for any sustained haptic.

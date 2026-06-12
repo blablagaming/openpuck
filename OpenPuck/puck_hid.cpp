@@ -108,11 +108,16 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type, uint8_t con
   uint8_t cmd = b[0], len = (n > 1) ? b[1] : 0;
   const uint8_t *pl = b + 2; uint16_t pln = (n >= 2) ? n - 2 : 0;
   if (cmd >= 0x80 && cmd <= 0x89) g_steamAliveMs = millis();   // any Steam settings/haptic/LED report (incl. the 0x87 lizard-off heartbeat) -> Steam present, forward gamepad, suppress auto-lizard
+  // Capture EVERY feature write (ANY report id, not just 0x01) into the diagnostic ring for the WebUSB capture
+  // view: haptics, LED SET_LED_COLOR, 0x87 settings, and the host power-off frame. The log shows cmd as "rid";
+  // bytes start [cmd][len]...  Only the report-0x01 path below relays to the controller; capture compiles out
+  // in a non-OPK_LOG build.
+  hapLogAdd((uint8_t)slot, cmd, b, n);
+  // Controller power-off: Steam's "turn off controller" is feature-0x01 frame 9F 04 6F 66 66 21 ("off!"),
+  // confirmed from a real puck capture. The feature-0x01 relay below forwards it once; hapticSendShutdown()
+  // bursts it for NO-ACK reliability (the single hook the test button + host-suspend also drive).
+  if (rid == 1 && cmd == 0x9F) hapticSendShutdown();
   if (rid == 1 && n >= 2) {   // report 0x01 = raw passthrough -> queue for RF relay to the controller
-    hapLogAdd((uint8_t)slot, cmd, b, n);   // capture EVERY relayed feature-1 command for the WebUSB capture view
-                                           // (haptics, LED SET_LED_COLOR, 0x87 settings, 0x9F power-off). The log
-                                           // shows cmd as "rid"; bytes start [cmd][len]...  Was gated to 0x80-0x89,
-                                           // which hid exactly the LED/power-off frames we now need to see.
     bool haptic82 = (cmd == 0x82 && len <= pln);
     bool muted = g_resumeMs && millis()-g_resumeMs < POST_RESUME_MUTE_MS;   // see the OUTPUT path: no haptics while Steam can't read 0x45 back
     bool relayOk = hapticRelaySlotOk(slot) && !(haptic82 && (lizardActive() || muted));  // never push haptics to the controller while presenting lizard (Steam isn't reading 0x45 -> would buzz-loop)

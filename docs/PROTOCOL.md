@@ -78,22 +78,42 @@ Returns:
 
 ### 3.3 Host-to-controller relay
 
-When Steam writes feature report `0x01`, OpenPuck forwards it over RF to the controller as an `E3` frame containing a SET sub-TLV:
+When Steam writes feature report `0x01`, OpenPuck forwards it over RF to the controller as an `E3` frame
+containing a sub-TLV. **CONFIRMED from a passive sniff of a real puck↔controller session** (`puck_sniffer`,
+`docs/sniffer.html`):
 
 ```text
-[E3][sub_len][0x05][report_id][payload...]
+[E3][tlvlen][0x01][report_id][innerlen][data...]
 ```
 
-`0x05` is the confirmed SET subtype. `0x01` is the GET subtype.
+- `tlvlen` counts the value after it = `report_id` + `innerlen` + `data` = `2 + len(data)`.
+- The type byte is **`0x01`** — the *same* type as the GET poll (`E3 02 01 45 <param>`); the `report_id`
+  selects the action. `innerlen` is the report's own declared length (the `[len]` byte of the feature payload).
+- `[report_id][innerlen][data]` is exactly the inner `[cmd][len][payload]` Steam wrote to feature `0x01`,
+  forwarded intact.
 
-This is how settings writes, haptics, and lizard-disable requests reach the controller.
+Confirmed examples from the sniff:
 
-The relay carries the command's **declared length** (the `[len]` byte of the feature payload), up to 60 bytes —
-the most one RF frame fits (`[E3][len][05][rid]` + payload ≤ MAXLEN 64). Multi-register `0x87` settings blocks
-(e.g. LED brightness) and calibration writes exceed 18 bytes, so any shorter cap silently corrupts them and the
-settings never land on the controller. Relays are staged in a small ring (not a single buffer): the USB SET
-callbacks run in ISR context and Steam sends settings/calibration as back-to-back bursts, so a single pending
-slot both drops reports and can be torn mid-flush. One queued relay is emitted per poll cycle.
+```text
+brightness   E3 05 01 87 03 2D <val> 00      (report 0x87, reg 0x2D)
+LED color    E3 12 01 C1 10 <R G B W> 03 09 05 FF*9   (+ E3 04 01 DC 02 01 02, E3 04 01 E2 02 01 20)
+haptic re-init E3 02 01 81 00 ,  E3 11 01 87 0F 30 …
+```
+
+This is how settings writes, haptics, LED, lizard-disable, and the controller power-off reach the controller.
+**Earlier OpenPuck builds used `[E3][len][0x05][rid][data]` — wrong type byte AND the `innerlen` was dropped, so
+the controller read the first data byte as the length and discarded every relayed command (LED / brightness /
+power-off all silently failed). Fixed to the form above.**
+
+**Controller power-off**: Steam's "turn off controller" is the feature-`0x01` command `9F 04 6F 66 66 21` —
+`cmd 0x9F`, `len 4`, payload `6F 66 66 21` = ASCII `"off!"`. Relayed (correctly framed) as
+`E3 06 01 9F 04 6F 66 66 21`. *(The exact RF frame still needs a clean sniff — it's a one-shot and the lossy
+sniffer missed it in the first capture; the framing above is the format every other command follows.)*
+
+The relay carries the command's declared length, up to 60 bytes — the most one RF frame fits
+(`[E3][tlvlen][01][rid][innerlen]` + payload ≤ MAXLEN 64). Relays are staged in a small ring (not a single
+buffer): the USB SET callbacks run in ISR context and Steam sends settings/calibration as back-to-back bursts,
+so a single pending slot both drops reports and can be torn mid-flush. One queued relay is emitted per poll cycle.
 
 ### 3.4 Connection presentation (input reports `0x79` / `0x7B`)
 

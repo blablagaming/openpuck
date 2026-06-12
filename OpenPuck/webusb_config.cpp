@@ -70,8 +70,8 @@ void webusbPoll(){
     // process complete commands from the front of buf
     for(;;){
       if(n==0) break;
-      uint8_t op=buf[0]; uint8_t need = (op==0x02)?3 : (op==0x03||op==0x05)?2 : 1;   // 0x05 carries a value byte
-      if(op<0x01 || op>0x07){ // resync: drop one byte
+      uint8_t op=buf[0]; uint8_t need = (op==0x02)?3 : (op==0x03||op==0x05)?2 : (op==0x09)?4 : 1;   // 0x05 carries a value byte; 0x09 carries R,G,B
+      if(op<0x01 || op>0x09){ // resync: drop one byte
         memmove(buf,buf+1,--n); continue;
       }
       if(n<need) break;                      // wait for more bytes
@@ -80,7 +80,12 @@ void webusbPoll(){
       else if(op==0x05){ hapLogResetDrain(buf[1]!=0); }   // rewind drain: buf[1]=1 from boot (whole ring), 0 from now
       else if(op==0x06){ webusbDrainCapture(); }          // drain entries since the rewind (panel polls this)
 #endif
-      else if(op==0x07){ hapticReinit(); }                // clear a stuck/latched haptic buzz on the controller (functional)
+      else if(op==0x07){ hapticArmBuzzFlood(); hapticReinit(); }   // (re)arm the 30s 10Hz buzz-clear flood; fire one now for instant feedback
+      else if(op==0x08){ hapticSendShutdown(); }                   // TEST: trigger the controller power-off attempt (same path host-suspend uses)
+      else if(op==0x09){                                           // set LED color: feature-0x01 cmd 0xC1, 16-byte RGBW payload (from led-set capture)
+        uint8_t led[16]={buf[1],buf[2],buf[3],0xff, 0x03,0x09,0x05, 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};   // [R][G][B][W=ff][03 09 05][ff x9] -- captured frame, RGB substituted
+        relayEnqueue(0xC1, led, sizeof led);
+      }
       else if(op==0x02){
         uint8_t f=buf[1], v=buf[2];
         bool persist=true;   // every settable field persists (poll rate is no longer settable)

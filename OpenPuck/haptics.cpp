@@ -194,17 +194,32 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1){
 // haptic registers (30/07/08/31/52, 18/2e/34/35). We replay it to recover from the latched-buzz the
 // controller falls into across a reconnect. Brightness (0x87 reg 2d) is deliberately OMITTED so we don't
 // stomp the LED. Enqueued onto the normal relay (drains in the poll cadence).
+// Buzz-clear, replayed by the 30s FLOOD at 10Hz. 0x81 resets ONLY -- NO 0x87. Flooding the 0x34/0x35=0xffff
+// haptic amplitude writes at 10Hz is what spiked the connect buzz, so the flood must stay 0x87-free. The
+// gyro-enabling 0x87 config is sent separately by hapticConnectInit (a few connect shots, not the flood).
 void hapticReinit(){
-  // Buzz-clear re-init, replayed by the flood at 10Hz/30s on connect. Deliver ONLY the 0x81 reset frames --
-  // EXACTLY what actually reached the controller on `main`, where connect buzzes were RARE. On `main` the 0x87
-  // writes in this sequence were sent with the wrong sub-TLV type and the controller DISCARDED them, so the
-  // flood was effectively just 0x81 reset spam. The framing fix (bf49c5f) made 0x87 writes LAND -- and flooding
-  // the haptic-config registers (07/08/31/52, 18/2e/34/35, incl. 0x34/0x35=0xffff) at 10Hz, which the real puck
-  // NEVER does (it sends them once at connect, if at all), is what spiked the connect buzz to ~every other
-  // connection. So the flooded re-init drops the 0x87 block and sends only the 0x81 resets, matching `main`.
   static const uint8_t T81A[]={0x00,0x00,0x00,0x00,0x00,0x00,0x00};
   static const uint8_t T81B[]={0x01,0x00,0x00,0x00,0x00,0x00,0x00};
   relayEnqueue(0x81, nullptr, 0);            // reset action (FUN_0001f554) -- Steam sends this first
+  relayEnqueue(0x81, T81A, sizeof T81A);
+  relayEnqueue(0x81, T81B, sizeof T81B);
+}
+// Connect-time GYRO-ENABLE + haptic config. The full 0x87 config block (07/08/31/52, 18/2e, 34/35) is what makes
+// the controller STREAM gyro -- A/B confirmed: with the full block the gyro works; without it the IMU freezes,
+// and dropping just 34/35 made it INTERMITTENT (so 34/35 is part of the enable). The freeze is tied to connect
+// (when streaming starts it stays on), so we send this as a few CONNECT SHOTS (HAPTIC_REINIT_SHOTS, ~350ms apart)
+// -- NOT in the 10Hz/30s flood, because flooding 0x34/0x35=0xffff is the buzz source. A handful of shots at
+// connect = reliable gyro enable + only a few amplitude writes (minimal buzz). NO 0x30 (any 0x30 freezes gyro).
+void hapticConnectInit(){
+  static const uint8_t H30[]={0x07,0x07,0x00,0x08,0x07,0x00,0x31,0x02,0x00,0x52,0x03,0x00};
+  static const uint8_t H18[]={0x18,0x00,0x00,0x2e,0x00,0x00,0x34,0xff,0xff,0x35,0xff,0xff,0x34,0xff,0xff};
+  static const uint8_t H35[]={0x35,0xff,0xff,0x2e,0x00,0x00};
+  static const uint8_t T81A[]={0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+  static const uint8_t T81B[]={0x01,0x00,0x00,0x00,0x00,0x00,0x00};
+  relayEnqueue(0x81, nullptr, 0);
+  relayEnqueue(0x87, H30, sizeof H30);       // 07/08/31/52
+  relayEnqueue(0x87, H18, sizeof H18);       // 18/2e/34/35 -- includes the writes that enable gyro streaming
+  relayEnqueue(0x87, H35, sizeof H35);
   relayEnqueue(0x81, T81A, sizeof T81A);
   relayEnqueue(0x81, T81B, sizeof T81B);
 }
@@ -243,16 +258,22 @@ void hapticTask(){
   if(up && !wasHapticLinkUp){ uint8_t mk=1; hapLogAdd(0xFD,0xEE,&mk,1); hapticOnReconnect(); }
   if(!up && wasHapticLinkUp){ uint8_t mk=0; hapLogAdd(0xFD,0xEE,&mk,1); }
   wasHapticLinkUp=up;
-  if(g_reinitAt && up && (int32_t)(millis()-g_reinitAt) >= 0){   // proactive haptic re-init across the connect window
-    hapticReinit();
-    g_reinitAt = (g_reinitLeft && --g_reinitLeft) ? (millis()+HAPTIC_REINIT_GAP_MS) : 0;
+  // HAPTIC-ENGINE INJECTION (connect config + buzz flood + idle re-init) runs ONLY in puck/Steam mode (!g_xbox).
+  // In the EMULATED controller modes (Xbox/Switch/HORI/PS5/DS4) there is no Steam driving haptics, and writing
+  // the controller's 0x81/0x87 config registers there is what was FREEZING the gyro -- the RF comms for emulated
+  // modes must stay a pure poll+transform, leaving the controller's own (default-on) IMU streaming untouched.
+  // Real 0x82 rumble (e.g. Xbox) is relayed separately via relayEnqueue and is NOT gated here.
+  if(!g_xbox){
+    if(g_reinitAt && up && (int32_t)(millis()-g_reinitAt) >= 0){   // connect SHOTS: full gyro-enable config (not the flood)
+      hapticConnectInit();
+      g_reinitAt = (g_reinitLeft && --g_reinitLeft) ? (millis()+HAPTIC_REINIT_GAP_MS) : 0;
+    }
+    // Buzz-clear FLOOD (g_buzzFlood, default ON): replay the 0x81 re-init at 10Hz across the armed window.
+    static unsigned long floodMs=0;
+    if (g_buzzFlood && (int32_t)(g_buzzFloodUntil - millis()) > 0 && up && millis()-floodMs >= HAPTIC_FLOOD_GAP_MS){ floodMs=millis(); hapticReinit(); }
+  } else {
+    g_reinitAt = 0;   // emulated modes: never inject -- just poll + transform
   }
-  // Buzz-clear FLOOD (g_buzzFlood, default ON): while the armed window is open (-> g_buzzFloodUntil) and the link
-  // is up, replay the haptic re-init every HAPTIC_FLOOD_GAP_MS (10Hz) to hammer the stuck-buzz latch. Auto-stops
-  // after 30s; re-armed on every connect and from the WebUSB panel. This is the PRIMARY buzz mitigation -- the
-  // connect config alone did not reliably stop it. Can be disabled from the panel for testing.
-  static unsigned long floodMs=0;
-  if (g_buzzFlood && (int32_t)(g_buzzFloodUntil - millis()) > 0 && up && millis()-floodMs >= HAPTIC_FLOOD_GAP_MS){ floodMs=millis(); hapticReinit(); }
   // Controller power-off on host SLEEP: send the power-off command (0x9F "off!") the instant the USB bus
   // suspends, like the real puck. BUT only when USB power (VBUS) is still present -- i.e. a genuine host sleep,
   // NOT a cable unplug. Pulling the dongle ALSO trips the suspend edge (in the brief window it runs on residual
@@ -270,5 +291,5 @@ void hapticTask(){
   // OPT-IN (g_buzzFlood): after haptic activity goes idle, fire one re-init to clear any latch it left behind.
   // Off by default along with the flood; the connect config is the primary defense. Always disarm so it doesn't
   // accumulate while disabled.
-  if (g_hapClearArmed && (millis()-g_haptic82Ms) > HAPTIC_CLEAR_IDLE_MS){ g_hapClearArmed=false; if(g_buzzFlood) hapticReinit(); }
+  if (g_hapClearArmed && (millis()-g_haptic82Ms) > HAPTIC_CLEAR_IDLE_MS){ g_hapClearArmed=false; if(!g_xbox && g_buzzFlood) hapticReinit(); }
 }

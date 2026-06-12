@@ -96,7 +96,8 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1);
 
 void hapticInit();   // boot reset: clear relay/active flags, arm the reconnect block
 void hapticTask();   // per-loop upkeep: link-edge markers + steam 0x82 quiet timeout + fires the scheduled re-init
-void hapticReinit(); // replay Steam's haptic-subsystem re-init to the controller -> clears a latched/stuck buzz
+void hapticReinit();      // 0x81-only buzz-clear, replayed by the 30s flood
+void hapticConnectInit(); // full 0x87 gyro-enable + haptic config, sent as a few connect shots (NOT flooded)
 // Called from rf_link the instant a controller (re)connect is detected (an F-reply after a gap): blocks haptic
 // relays for HAPTIC_RECONNECT_BLOCK_MS and schedules a re-init just after, to keep the freshly-booted
 // controller out of the degraded/latched haptic state. Reliable -- independent of hapticTask's link heuristic.

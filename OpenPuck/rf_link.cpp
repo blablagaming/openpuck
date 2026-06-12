@@ -49,6 +49,7 @@ static uint8_t  g_e3pid = 0;
 static uint32_t g_stPoll=0, g_stF1=0, g_stF3=0; static unsigned long g_stMs=0;
 static uint8_t  g_lastSeq=0; static uint32_t g_stNew=0;
 static uint32_t g_stCrc=0, g_stNoRx=0;
+static uint32_t g_imuDec=0, g_imuSkip=0;   // DIAG: per-second IMU-decode vs guard-skip counts
 static uint32_t g_chF1[3]={0,0,0};
 static uint32_t g_lastPollUs=0;
 static uint32_t g_connRx = 0;
@@ -197,8 +198,10 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen, u
             // imuFrom45 would read STALE bytes past the received data and clobber g_in's gyro/accel -- the "gyro
             // randomly stops/glitches" bug, only visible in the stream modes (PS5/Switch) that emit g_in's IMU.
             // On a short frame we leave the last good IMU in place rather than injecting garbage.
-            if(tlen>=46 && (size_t)(idx+2)+46<=(size_t)end)
+            if(tlen>=46 && (size_t)(idx+2)+46<=(size_t)end){
               imuFrom45(rep, &g_in.ax,&g_in.ay,&g_in.az,&g_in.gx,&g_in.gy,&g_in.gz);
+              g_imuDec++;            // DIAG: IMU decoded this frame
+            } else g_imuSkip++;      // DIAG: 0x45 seen but IMU guard skipped (short frame) -> g_in gyro held
             // Mode-switch chord (all 4 back + face): don't leak the face press to the host. g_in.buttons stays
             // intact so the chord detector still fires; per-mode builders mask the same bits while back-4 held.
             if((bb&CHORD_BACK4)==CHORD_BACK4)
@@ -331,5 +334,5 @@ void rfLinkTask(){
     }
   }
   if (g_connOn && millis()-g_stMs>=1000){ g_f1ps=g_stF1; g_newps=g_stNew; g_pollsps=(uint16_t)g_stPoll;
-    g_pollPeriodUs = g_pollDtCnt ? (uint16_t)(g_pollDtSum/g_pollDtCnt) : 0; g_pollDtSum=0; g_pollDtCnt=0; if(Serial.availableForWrite()>70) Serial.printf("# stat polls=%lu/s F1=%lu/s new=%lu/s F3=%lu/s(v%d) e7b=%u crcfail=%lu noRx=%lu slot=%d\n",(unsigned long)g_stPoll,(unsigned long)g_stF1,(unsigned long)g_stNew,(unsigned long)g_stF3,(int8_t)g_connF3v,g_e7b,(unsigned long)g_stCrc,(unsigned long)g_stNoRx,g_connSlot); g_stPoll=0; g_stF1=0; g_stNew=0; g_stF3=0; g_stCrc=0; g_stNoRx=0; g_chF1[0]=g_chF1[1]=g_chF1[2]=0; g_stMs=millis(); }
+    g_pollPeriodUs = g_pollDtCnt ? (uint16_t)(g_pollDtSum/g_pollDtCnt) : 0; g_pollDtSum=0; g_pollDtCnt=0; if(Serial.availableForWrite()>70) Serial.printf("# stat polls=%lu/s F1=%lu/s new=%lu/s F3=%lu/s(v%d) e7b=%u crcfail=%lu noRx=%lu slot=%d | IMU dec=%lu skip=%lu gxyz=%d,%d,%d\n",(unsigned long)g_stPoll,(unsigned long)g_stF1,(unsigned long)g_stNew,(unsigned long)g_stF3,(int8_t)g_connF3v,g_e7b,(unsigned long)g_stCrc,(unsigned long)g_stNoRx,g_connSlot,(unsigned long)g_imuDec,(unsigned long)g_imuSkip,g_in.gx,g_in.gy,g_in.gz); g_stPoll=0; g_stF1=0; g_stNew=0; g_stF3=0; g_stCrc=0; g_stNoRx=0; g_imuDec=0; g_imuSkip=0; g_chF1[0]=g_chF1[1]=g_chF1[2]=0; g_stMs=millis(); }
 }

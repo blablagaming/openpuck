@@ -5,6 +5,7 @@
 #include "haptics.h"
 #include "puck_hid.h"
 #include "build_info.h"
+#include "triton.h"   // g_in -- DIAG: surface decoded IMU to the panel
 #include <Arduino.h>
 #include <string.h>
 
@@ -15,14 +16,14 @@ Adafruit_USBD_WebUSB usb_web;
 //                [qos][persistMode][chordBtn B][chordBtn X][chordBtn Y][pollsps_lo][pollsps_hi]
 //                [loopPeriod_lo][loopPeriod_hi][loopWorstIdx][loopWorstUs_lo][loopWorstUs_hi]
 //                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
-//                [gitDirty][gitHash 12B ASCII, NUL-padded][buzzFlood]
-#define WB_PAYLEN 52
+//                [gitDirty][gitHash 12B ASCII, NUL-padded][buzzFlood][g_in.gx s16][g_in.gy s16][g_in.gz s16]
+#define WB_PAYLEN 58
 static void webusbSendBlob(){
   if(!usb_web.connected()) return;
   bool up = (g_connSlot>=0 && (millis()-g_connReplyMs) < 300);
   uint8_t p[2+WB_PAYLEN];
   p[0]=0xA5; p[1]=WB_PAYLEN;
-  p[2]=5;                          // protocol version (5 = +buzzFlood at [53]; 4 = git provenance; 3 = battery/rssi)
+  p[2]=6;                          // protocol version (6 = +decoded IMU gyro at [54..59]; 5 = buzzFlood; 4 = git)
   p[3]=g_usbMode; p[4]=(uint8_t)g_mDiv; p[5]=(uint8_t)g_mFric; p[6]=0 /*rsvd: ex-padSmooth*/; p[7]=g_abSwap;
   p[8]=g_back[0]; p[9]=g_back[1]; p[10]=g_back[2]; p[11]=g_back[3];
   p[12]=(g_connSlot>=0)?(uint8_t)g_connSlot:0xFF;
@@ -47,6 +48,9 @@ static void webusbSendBlob(){
   memset(&p[41],0,12);                                                 // 12B ASCII git hash, NUL-padded
   { const char* h=OPK_GIT_HASH; for(uint8_t i=0;i<12 && h[i];i++) p[41+i]=(uint8_t)h[i]; }
   p[53]=g_buzzFlood?1:0;                                               // connect-time buzz-clear flood enabled?
+  p[54]=(uint8_t)g_in.gx; p[55]=(uint8_t)(g_in.gx>>8);                 // DIAG: decoded gyro (does g_in update in PS5/Switch?)
+  p[56]=(uint8_t)g_in.gy; p[57]=(uint8_t)(g_in.gy>>8);
+  p[58]=(uint8_t)g_in.gz; p[59]=(uint8_t)(g_in.gz>>8);
   usb_web.write(p,sizeof p); usb_web.flush();
 }
 #if OPK_LOG

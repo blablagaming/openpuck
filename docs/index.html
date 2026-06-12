@@ -89,6 +89,7 @@
         <div class="stat logonly"><div class="k">Slowest stage</div><div class="v" id="stWorst">—</div></div>
         <div class="stat logonly"><div class="k">Poll period act/want</div><div class="v" id="stPollPer">—</div></div>
         <div class="stat"><div class="k">Build (git)</div><div class="v" id="stBuild">—</div></div>
+        <div class="stat"><div class="k">Gyro (g_in)</div><div class="v" id="stGyro">—</div></div>
       </div>
       <p class="note logonly">Polls/s ≈ 250 expected; it's capped by Loop period (≈4000 µs needed). "Slowest stage" is the loop section eating the most time per iteration.</p>
       <div class="row" style="margin:10px 0 0"><button id="hapClear">Clear stuck buzz</button>
@@ -97,7 +98,7 @@
       <div class="row" style="margin:10px 0 0"><label>Connect-time flood</label><button id="buzzFlood">off</button>
         <span class="note" style="flex:1">Floods the buzz-clear re-init at 10&nbsp;Hz for 30&nbsp;s after every connect — the proven fix for the connect-time stuck buzz. <strong>On by default</strong>; only turn it off if you're testing. Persists across reboots.</span>
       </div>
-      <div class="row" style="margin:10px 0 0"><button id="ctlrOff">Turn off controller (test)</button>
+      <div class="row" style="margin:10px 0 0"><button id="ctlrOff">Turn off controller</button>
         <span class="note" style="flex:1">Fires the controller power-off (0x9F "off!", x3) — the same path host-suspend uses. Watch the capture / link status to see if the controller actually disconnects.</span>
       </div>
       <div class="row" style="margin:18px 0 0;border-top:1px solid #4a2030;padding-top:14px">
@@ -249,6 +250,13 @@ function applyBlob(p){
   $("#stBuild").innerHTML = gitHash
     ? (gitHash + (gitDirty ? ' <span class="pill dn">dirty</span>' : ' <span class="pill up">clean</span>'))
     : "—";
+  // DIAG (protocol v6+): decoded g_in gyro at p[52..57]. If these change when you rotate the controller, g_in is
+  // updating (so a dead PS5 gyro is downstream: DS5 report packing / calibration). If frozen, the decode path is.
+  if(p.length>57){
+    const s16=(lo,hi)=>{let v=lo|(hi<<8);return v&0x8000?v-0x10000:v;};
+    const gx=s16(p[52],p[53]), gy=s16(p[54],p[55]), gz=s16(p[56],p[57]);
+    $("#stGyro").textContent = `${gx}, ${gy}, ${gz}`;
+  }
   // sliders (only if not being dragged)
   setSlider("mDiv",mDiv); setSlider("mFric",mFric);
   $("#abSwap").textContent = abSwap? "on":"off"; $("#abSwap").classList.toggle("active",!!abSwap);

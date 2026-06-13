@@ -4,6 +4,7 @@
 #include "rf_link.h"
 #include "haptics.h"
 #include "puck_hid.h"
+#include "build_info.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -13,14 +14,15 @@ Adafruit_USBD_WebUSB usb_web;
 //                [f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub][fwdNewOnly]
 //                [qos][persistMode][chordBtn B][chordBtn X][chordBtn Y][pollsps_lo][pollsps_hi]
 //                [loopPeriod_lo][loopPeriod_hi][loopWorstIdx][loopWorstUs_lo][loopWorstUs_hi]
-//                [pollPeriod_lo][pollPeriod_hi][logEnabled]
-#define WB_PAYLEN 36
+//                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
+//                [gitDirty][gitHash 12B ASCII, NUL-padded]
+#define WB_PAYLEN 51
 static void webusbSendBlob(){
   if(!usb_web.connected()) return;
   bool up = (g_connSlot>=0 && (millis()-g_connReplyMs) < 300);
   uint8_t p[2+WB_PAYLEN];
   p[0]=0xA5; p[1]=WB_PAYLEN;
-  p[2]=2;                          // protocol version (2 = chordBtn[3] in blob)
+  p[2]=4;                          // protocol version (4 = +battery/rssi/git; 2 = chordBtn[3])
   p[3]=g_usbMode; p[4]=(uint8_t)g_mDiv; p[5]=(uint8_t)g_mFric; p[6]=0 /*rsvd: ex-padSmooth*/; p[7]=g_abSwap;
   p[8]=g_back[0]; p[9]=g_back[1]; p[10]=g_back[2]; p[11]=g_back[3];
   p[12]=(g_connSlot>=0)?(uint8_t)g_connSlot:0xFF;
@@ -36,6 +38,14 @@ static void webusbSendBlob(){
   p[32]=g_loopWorst; p[33]=(uint8_t)g_loopWorstUs; p[34]=(uint8_t)(g_loopWorstUs>>8);
   p[35]=(uint8_t)g_pollPeriodUs; p[36]=(uint8_t)(g_pollPeriodUs>>8);   // measured actual poll period (vs intended 4000)
   p[37]=OPK_LOG;                                                       // logging build? panel shows/hides its log UI
+  p[38]=g_battery;                                                     // controller battery % (report 0x43); 0=unknown
+  p[39]=g_linkRssi;                                                    // RAW signal strength |dBm| (0=no sample)
+  // Build provenance: which git commit this firmware was built from, and whether the tree was dirty. Lets the
+  // panel confirm exactly what's flashed. Injected at build time (build_info.h / gen_version.sh); "unknown" if
+  // the version header wasn't generated.
+  p[40]=OPK_GIT_DIRTY ? 1 : 0;
+  memset(&p[41],0,12);                                                 // 12B ASCII git hash, NUL-padded
+  { const char* h=OPK_GIT_HASH; for(uint8_t i=0;i<12 && h[i];i++) p[41+i]=(uint8_t)h[i]; }
   usb_web.write(p,sizeof p); usb_web.flush();
 }
 #if OPK_LOG
@@ -70,8 +80,8 @@ void webusbPoll(){
     // process complete commands from the front of buf
     for(;;){
       if(n==0) break;
-      uint8_t op=buf[0]; uint8_t need = (op==0x02)?3 : (op==0x03||op==0x05)?2 : 1;   // 0x05 carries a value byte
-      if(op<0x01 || op>0x07){ // resync: drop one byte
+      uint8_t op=buf[0]; uint8_t need = (op==0x02)?3 : (op==0x03||op==0x05)?2 : (op==0x0A)?4 : 1;   // 0x05 carries a value byte; 0x0A carries a 3-byte magic
+      if(op<0x01 || op>0x0A){ // resync: drop one byte
         memmove(buf,buf+1,--n); continue;
       }
       if(n<need) break;                      // wait for more bytes
@@ -81,6 +91,12 @@ void webusbPoll(){
       else if(op==0x06){ webusbDrainCapture(); }          // drain entries since the rewind (panel polls this)
 #endif
       else if(op==0x07){ hapticReinit(); }                // clear a stuck/latched haptic buzz on the controller (functional)
+      else if(op==0x08){ hapticSendShutdown(); }          // TEST: trigger the controller power-off (same path Steam 0x9F / host-suspend use)
+      else if(op==0x0A){                                  // FULL factory wipe: erase cfg.bin + bonds.bin, reboot to clean defaults.
+        // Guarded by a 3-byte magic ("ERS") so a stray/corrupt byte can never trigger it; the panel double-
+        // confirms before sending. Irreversible -- the controller must be re-paired afterwards.
+        if(buf[1]==0x45 && buf[2]==0x52 && buf[3]==0x53){ usb_web.flush(); factoryErase(); delay(40); NVIC_SystemReset(); }
+      }
       else if(op==0x02){
         uint8_t f=buf[1], v=buf[2];
         bool persist=true;   // every settable field persists (poll rate is no longer settable)

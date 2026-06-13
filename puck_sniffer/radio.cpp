@@ -37,8 +37,7 @@ uint8_t  g_whiteiv = 37;
 uint8_t  g_mode    = RADIO_MODE_MODE_Ble_2Mbit;   // <-- was the bug (1Mbit). Real puck = 2Mbit.
 uint32_t g_pcnf0   = 0x00030008UL;                // S0LEN0, LFLEN8, S1LEN3 (ESB DPL) - CRC-VALIDATED
 uint8_t  g_statlen = 0x20;
-uint32_t g_pcnf1   = 0x01040060;                  // ENDIAN=Big, BALEN4, MAXLEN=96 (was 64 -> truncated the controller's
-                                                  // 66-byte 0x43-battery-augmented F1 -> CRC-fail -> battery never arrived)
+uint32_t g_pcnf1   = 0x01040060;                  // ENDIAN=Big, BALEN4, MAXLEN=96 (was 64; longer F1 frames e.g. 0x43-augmented)
 uint32_t g_crcpoly = 0x11021UL;
 uint16_t g_crccnf  = 0x2;                          // CRC16, address included
 uint8_t  g_pid     = 0;
@@ -52,6 +51,25 @@ void rfSetAddr(const uint8_t b4[4], uint8_t prefix){
   NRF_RADIO->BASE0   = ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|((uint32_t)b[2]<<8)|b[3];
   NRF_RADIO->PREFIX0 = g_prefixRaw ? prefix : rfBitrev8(prefix);
   NRF_RADIO->TXADDRESS = 0; NRF_RADIO->RXADDRESSES = 1u<<0;
+}
+
+// Listen on ONE base across ALL 8 ESB logical addresses (pipes): the real prefix on pipe 0, plus a spread of
+// neighbour prefixes on pipes 1..7 (BASE1 mirrors BASE0). Catches a controller whose reply stream rides the
+// same base on a DIFFERENT prefix -- a real possibility per the RE notes' "separate stream" model -- without
+// us having to know that prefix in advance. RXMATCH (reported per packet) then tells us which pipe it used.
+// Extra pipes only ADD matches; they never drop the pipe-0 (puck) frames. base/prefix are stored (pre-transform)
+// bytes; the on-air values get the same bitrev8 transform as rfSetAddr (g_prefixRaw=false).
+void rfSetAddrMulti(const uint8_t b4[4], uint8_t prefix){
+  uint8_t b[4]; for(int i=0;i<4;i++) b[i]=rfBitrev8(b4[i]);
+  uint32_t base = ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|((uint32_t)b[2]<<8)|b[3];
+  NRF_RADIO->BASE0 = base; NRF_RADIO->BASE1 = base;          // pipe 0 uses BASE0; pipes 1..7 use BASE1
+  // 8 candidate prefixes: the learned one first, then a spread. De-dup isn't needed (a repeat just matches twice).
+  uint8_t cand[8] = { prefix, (uint8_t)(prefix^0x01), (uint8_t)(prefix+1), (uint8_t)(prefix-1),
+                      0x10, (uint8_t)(prefix^0x80), (uint8_t)(prefix+0x10), (uint8_t)(prefix-0x10) };
+  uint8_t ap[8]; for(int i=0;i<8;i++) ap[i] = g_prefixRaw ? cand[i] : rfBitrev8(cand[i]);
+  NRF_RADIO->PREFIX0 = (uint32_t)ap[0] | ((uint32_t)ap[1]<<8) | ((uint32_t)ap[2]<<16) | ((uint32_t)ap[3]<<24);
+  NRF_RADIO->PREFIX1 = (uint32_t)ap[4] | ((uint32_t)ap[5]<<8) | ((uint32_t)ap[6]<<16) | ((uint32_t)ap[7]<<24);
+  NRF_RADIO->TXADDRESS = 0; NRF_RADIO->RXADDRESSES = 0xFF;   // enable all 8 pipes
 }
 
 void rfConfig(uint8_t ch){

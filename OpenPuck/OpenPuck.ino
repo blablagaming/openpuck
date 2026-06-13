@@ -20,6 +20,7 @@
 using namespace Adafruit_LittleFS_Namespace;
 
 #include "config.h"
+#include "build_info.h"   // OPK_GIT_HASH (used to tag the one-time factory-reset build)
 #include "identity.h"
 #include "bonds.h"
 #include "radio.h"
@@ -43,6 +44,11 @@ void setup() {
   ledInit();
   rfGenSessionAddr();   // per-device unique RF session address (advertised in the host frame; isolates pucks)
   InternalFS.begin();
+#if OPK_FACTORY_RESET
+  // Recovery build (-DOPK_FACTORY_RESET=1): wipe ALL persistent storage ONCE on the first boot after flashing,
+  // then persist normally (tracked by a git-hash tag so it does NOT wipe every boot). See config.h / config.cpp.
+  factoryResetOnce(OPK_GIT_HASH);
+#endif
   loadCfg(); g_xbox = !modeIsPuck(g_usbMode);   // load persisted config + decide USB presentation BEFORE registering interfaces
   g_active = controllerFor(g_usbMode);
 

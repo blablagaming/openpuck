@@ -2,16 +2,29 @@
 #include "bonds.h"
 #include "config.h"
 #include "rf_link.h"
+#include <Adafruit_TinyUSB.h>   // USBDevice.suspended() -> autonomous controller power-off on host sleep
 #include <Arduino.h>
 #include <string.h>
 
 uint8_t          g_relayOp  = 0xE3;   // E3 poll
-// relay sub-TLV type byte = SET (confirmed on hardware: E3 + [len][05][rid][payload] makes the controller act
-// on it -- haptics buzz + lizard-off lands). GET is 01.
+// relay sub-TLV TYPE byte. Vestigial now: rfConnFlushRelay derives the on-air type from the report id (see the
+// CONFIRMED split there -- 0x05 for actuators/haptics <0x87, 0x01 for config/settings/LED >=0x87). Still exposed
+// over WebUSB (relaySub field) for the buzz-hunt diagnostics, but the flush path no longer reads it.
 uint8_t          g_relaySub = 0x05;
 volatile uint8_t g_testHaptic = 0;
 volatile uint8_t g_hapticStop = 0;
 unsigned long    g_hapticBlockUntil = 0;   // drop Steam haptics briefly during reconnect settle
+
+// Controller power-off. CONFIRMED from a real Windows USB capture of the Valve puck (shutoff.pcapng): Steam's
+// "turn off controller" is the single feature-0x01 command 0x9F with payload ASCII "off!" (6F 66 66 21). The
+// dongle forwards host feature reports to the controller verbatim, so the controller acts on report 0x9F
+// directly -- we relay it the same way (E3 SET sub-TLV). The wire relay is NO-ACK, so send a small burst: a
+// single lost frame must not leave the controller on. Driven by the Steam 0x9F passthrough (puck_hid), the
+// host-suspend edge (hapticTask), and the WebUSB test button (op 0x08).
+void hapticSendShutdown(){
+  static const uint8_t OFF[4] = {0x6f,0x66,0x66,0x21};   // "off!"
+  for (uint8_t i=0; i<HAPTIC_SHUTDOWN_SHOTS; i++) relayEnqueue(0x9F, OFF, sizeof OFF);
+}
 
 static unsigned long g_haptic82Ms = 0;     // millis of last 0x82 haptic OUTPUT relayed (Steam mode)
 static bool          g_haptic82On = false; // a non-zero 0x82 haptic is currently active (awaiting host stop)
@@ -147,15 +160,33 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1){
     RelayMsg &m = g_rq[g_rqTail];
     if(m.rid){                          // rid 0 = entry voided by hapticCancelPendingOn -> skip, take the next
       uint8_t rl = m.len; if(rl > RELAY_MAXP) rl = RELAY_MAXP;
-      uint8_t p[4+RELAY_MAXP]; p[0]=g_relayOp; p[1]=(uint8_t)(1+rl); p[2]=g_relaySub; p[3]=m.rid;
-      memcpy(p+4, m.data, rl);
+      // On-air sub-TLV framing. CONFIRMED from real puck<->controller sniffs (puck_sniffer): a command LANDS on
+      // the controller only with the type-01 + inner-len form  E3 [2+rl][01][rid][innerlen][data]; the legacy
+      // form  E3 [1+rl][05][rid][data]  (no inner-len) is what the long-working build shipped, and the controller
+      // DISCARDS any 0x87+ command sent that way (it reads data[0] as the length).
+      //
+      // We WHITELIST the landing form to EXACTLY the two commands that need it -- and nothing else:
+      //   * LED brightness  -- report 0x87 whose first register byte is 0x2D
+      //   * controller power-off -- report 0x9F ("off!")
+      // Everything else keeps the legacy form. This is the crux: Steam ALSO sends 0x87 passthrough writes during
+      // normal play -- the haptic-config block (reg 0x30 = IMU/subsystem enable, 0x34/0x35 = haptic amplitude). On
+      // the legacy framing the controller discards them, which is WHY the gyro keeps streaming (a landed 0x30
+      // FREEZES the IMU) and the haptics stay quiet (landed 0x34/0x35 = the connect buzz). Landing ALL 0x87 (the
+      // naive "split on >=0x87") regresses BOTH: stuck gyro + buzz. So keep this list tight.
+      bool land01 = (m.rid==0x9F) || (m.rid==0x87 && rl>=1 && m.data[0]==0x2D);
+      uint8_t p[5+RELAY_MAXP], plen;
+      if (land01){
+        p[0]=g_relayOp; p[1]=(uint8_t)(2+rl); p[2]=0x01; p[3]=m.rid; p[4]=rl; memcpy(p+5, m.data, rl); plen=(uint8_t)(5+rl);
+      } else {
+        p[0]=g_relayOp; p[1]=(uint8_t)(1+rl); p[2]=0x05; p[3]=m.rid;          memcpy(p+4, m.data, rl); plen=(uint8_t)(4+rl);
+      }
       hapLogAdd(0xFE, m.rid, m.data, rl);   // log what we actually TX to the controller (slot 0xFE) for the buzz hunt
       g_rqTail = rqNext(g_rqTail);      // copied out -> release the slot before the TX
       // s1 carries a PID distinct from the GET poll that follows (caller cycles it), so the controller's ESB
       // dedup never mistakes the GET for a retransmit of this relay. 80us RX window: the relay is NO-ACK, the
       // controller sends nothing back, so don't burn the full ~1.2ms reply window (that was halving the poll
       // rate during haptics).
-      rfConnTx(ch,s1,p,(uint8_t)(4+rl),80);
+      rfConnTx(ch,s1,p,plen,80);
       return;                           // ONE relay per poll cycle (matches the real puck's pacing)
     }
     g_rqTail = rqNext(g_rqTail);
@@ -167,11 +198,12 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1){
 // haptic registers (30/07/08/31/52, 18/2e/34/35). We replay it to recover from the latched-buzz the
 // controller falls into across a reconnect. Brightness (0x87 reg 2d) is deliberately OMITTED so we don't
 // stomp the LED. Enqueued onto the normal relay (drains in the poll cadence).
+//
+// NOTE: the 0x87 frames below go out on the LEGACY (type-05) framing -- the relay whitelist only lands 0x87
+// when its first register is brightness 0x2D -- so the controller DISCARDS them, exactly as on the long-working
+// build. They are kept verbatim so this path matches that build byte-for-byte; the effective re-init is the
+// three 0x81 frames, which is what cleared the buzz there. (Landing the 0x30 here would freeze the gyro.)
 void hapticReinit(){
-  // The FULL sequence Steam sends when it (re)takes control / on a Steam-button press -- captured on hardware
-  // and proven to clear a stuck haptic. Replayed verbatim and in order (no trimming this time: the brightness
-  // write 0x87[2d] and the two 7-byte 0x81 frames are part of what Steam sends, and dropping them may be why
-  // the trimmed version didn't always clear the connect buzz).
   static const uint8_t H30[]={0x30,0x00,0x00,0x07,0x07,0x00,0x08,0x07,0x00,0x31,0x02,0x00,0x52,0x03,0x00};
   static const uint8_t H18[]={0x18,0x00,0x00,0x2e,0x00,0x00,0x34,0xff,0xff,0x35,0xff,0xff,0x34,0xff,0xff};
   static const uint8_t H35[]={0x35,0xff,0xff,0x2e,0x00,0x00};
@@ -183,8 +215,6 @@ void hapticReinit(){
   relayEnqueue(0x87, H35, sizeof H35);
   relayEnqueue(0x81, T81A, sizeof T81A);
   relayEnqueue(0x81, T81B, sizeof T81B);
-  // NOTE: the brightness write (0x87 2d) that Steam includes is deliberately OMITTED -- it's an LED setting,
-  // not haptic, and this re-init now fires often (after every haptic-idle), so we must not flicker the LED.
 }
 void hapticInit(){
   g_rqHead = g_rqTail = 0; g_haptic82On=false;
@@ -224,6 +254,16 @@ void hapticTask(){
     hapticReinit();
     g_reinitAt = (g_reinitLeft && --g_reinitLeft) ? (millis()+HAPTIC_REINIT_GAP_MS) : 0;
   }
+  // Controller power-off on host SLEEP: send the power-off command (0x9F "off!") the instant the USB bus
+  // suspends, like the real puck. BUT only when USB power (VBUS) is still present -- i.e. a genuine host sleep,
+  // NOT a cable unplug. Pulling the dongle ALSO trips the suspend edge (in the brief window it runs on residual
+  // power), and we must NOT kill the controller then; it should only power off on a shutdown command or a real
+  // host sleep. VBUSDETECT is 1 while the cable still delivers 5V, 0 once unplugged. wasSusp starts true so a
+  // boot-into-suspended state never false-fires.
+  static bool wasSusp=true; bool susp=USBDevice.suspended();
+  bool vbus = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  if (susp && !wasSusp && vbus) hapticSendShutdown();
+  wasSusp=susp;
   // Steam-mode: host went quiet -> mark the 0x82 stream inactive. Do NOT synthesize a stop: trackpad haptics
   // are one-shot pulses, so firing a 0x82-zero ~HAPTIC_QUIET_MS after a swipe ends is the extra end-of-movement
   // click the real puck doesn't make. Steam forwards its own stop for any sustained haptic.

@@ -108,6 +108,10 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type, uint8_t con
   uint8_t cmd = b[0], len = (n > 1) ? b[1] : 0;
   const uint8_t *pl = b + 2; uint16_t pln = (n >= 2) ? n - 2 : 0;
   if (cmd >= 0x80 && cmd <= 0x89) g_steamAliveMs = millis();   // any Steam settings/haptic/LED report (incl. the 0x87 lizard-off heartbeat) -> Steam present, forward gamepad, suppress auto-lizard
+  // Controller power-off: Steam's "turn off controller" is feature-0x01 frame 9F 04 6F 66 66 21 ("off!"),
+  // confirmed from a real puck capture. The feature-0x01 relay below forwards it once; hapticSendShutdown()
+  // bursts it for NO-ACK reliability (the single hook the test button + host-suspend also drive).
+  if (rid == 1 && cmd == 0x9F) hapticSendShutdown();
   if (rid == 1 && n >= 2) {   // report 0x01 = raw passthrough -> queue for RF relay to the controller
     hapLogAdd((uint8_t)slot, cmd, b, n);   // capture EVERY relayed feature-1 command for the WebUSB capture view
                                            // (haptics, LED SET_LED_COLOR, 0x87 settings, 0x9F power-off). The log
@@ -219,6 +223,18 @@ void SteamPuckController::onReport45(const uint8_t* rep, bool fresh, uint8_t bod
     if((fresh || !g_fwdNewOnly) && g_slot[g_connSlot].used && hid[g_connSlot].ready())
       hid[g_connSlot].sendReport(0x45, rep+1, blen);   // Steam/SDL: input report -> "connected"
   }
+}
+
+// Forward the controller's NON-input status reports (0x43 power/battery, 0x44) to Steam verbatim -- the real
+// puck does this and it's how Steam reads battery. OpenPuck used to drop everything but 0x45, so Steam never got
+// the power report (-> default/unknown battery). Same host-asleep / post-resume gating as 0x45; no lizard path
+// (status reports aren't input, so they forward regardless of the lizard decision).
+void SteamPuckController::onAuxReport(uint8_t rid, const uint8_t* data, uint8_t n){
+  if (USBDevice.suspended()) return;
+  if (g_resumeMs && millis()-g_resumeMs < POST_RESUME_MUTE_MS) return;
+  if (g_connSlot < 0 || g_connSlot >= NSLOT) return;
+  if (g_slot[g_connSlot].used && hid[g_connSlot].ready())
+    hid[g_connSlot].sendReport(rid, data, n);
 }
 
 // ---- wake nudge: a bare USB resume signal is NOT enough to wake some hosts (Windows in particular) -- they

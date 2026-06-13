@@ -39,6 +39,9 @@
 // during use (a buzz that starts seconds after connect and won't self-clear). Long enough not to fire between
 // rapid in-game haptics; short enough to clear a stuck buzz soon after the user pauses.
 #define HAPTIC_CLEAR_IDLE_MS 1200u
+// Controller power-off: hapticSendShutdown() relays Steam's confirmed "turn off controller" command (feature-0x01
+// cmd 0x9F, payload "off!" -- captured from the real puck). Sent as a small burst because the RF relay is NO-ACK.
+#define HAPTIC_SHUTDOWN_SHOTS 3u
 
 // ---- relay queue (written by puck_hid.cpp, mode_xinput.cpp, serial_console.cpp; drained by rf_link.cpp) ----
 // Enqueue one host->controller report: rid = report/command id, payload = the bytes AFTER [cmd][len] (what
@@ -50,6 +53,7 @@ extern uint8_t          g_relaySub;  // relay sub-TLV type byte = SET
 extern volatile uint8_t g_testHaptic;// 't<n>' injects n test haptics for the buzz hunt
 extern volatile uint8_t g_hapticStop;// pending haptic-STOP frames to relay (kill a latched whine)
 extern unsigned long    g_hapticBlockUntil;
+void hapticSendShutdown();           // relay the controller power-off (0x9F "off!"), burst x3 (Steam 0x9F / host-suspend / test button)
 
 // ---- diagnostic capture (compiled in only when OPK_LOG): a ring of recent host->controller commands +
 //      link/TX markers, dumped over WebUSB. No-ops in a production build so call sites vanish. ----

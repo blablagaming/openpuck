@@ -32,7 +32,7 @@ extern uint8_t  g_sessBase[4];
 extern uint8_t  g_sessPrefix;
 void rfGenSessionAddr();
 
-extern uint8_t  rfrx[100], rftx[100];  // RADIO DMA buffers (>= MAXLEN+2; the controller's 0x43-augmented F1 is ~66B)
+extern uint8_t  rfrx[100], rftx[100];  // RADIO DMA buffers
 extern uint32_t g_rfRxCount;
 
 // ---- tunable radio parameters (CDC console M/0/2/i/w/I/P/N/T/A) ----
@@ -52,5 +52,8 @@ uint8_t rfBitrev8(uint8_t x);
 // Access address (IBEX FUN_00037530): BASE0 = bitrev8 each base byte packed big-endian; PREFIX0 = raw or
 // bitrev8 prefix per g_prefixRaw. "ibex" 69 62 65 78 -> BASE0=0x9646A61E, PREFIX0=0x10.
 void rfSetAddr(const uint8_t b4[4], uint8_t prefix);
+// Listen on one base across all 8 ESB pipes (learned prefix + a neighbour spread) so a same-base/other-prefix
+// controller stream is still caught; RXMATCH then reveals which pipe. See radio.cpp for the candidate set.
+void rfSetAddrMulti(const uint8_t b4[4], uint8_t prefix);
 // Program MODE/FREQUENCY/PCNF/CRC/whitening from the tunables above onto channel ch (radio left disabled).
 void rfConfig(uint8_t ch);

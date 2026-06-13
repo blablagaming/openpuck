@@ -79,6 +79,8 @@
       <h2>Link status</h2>
       <div class="statgrid">
         <div class="stat"><div class="k">RF link</div><div class="v" id="stLink">—</div></div>
+        <div class="stat"><div class="k">Battery</div><div class="v" id="stBatt">—</div></div>
+        <div class="stat"><div class="k">Signal</div><div class="v" id="stRssi">—</div></div>
         <div class="stat"><div class="k">Slot</div><div class="v" id="stSlot">—</div></div>
         <div class="stat"><div class="k">Delivered</div><div class="v" id="stRate">—</div></div>
         <div class="stat"><div class="k">New reports</div><div class="v" id="stNew">—</div></div>
@@ -86,10 +88,18 @@
         <div class="stat logonly"><div class="k">Loop period</div><div class="v" id="stLoop">—</div></div>
         <div class="stat logonly"><div class="k">Slowest stage</div><div class="v" id="stWorst">—</div></div>
         <div class="stat logonly"><div class="k">Poll period act/want</div><div class="v" id="stPollPer">—</div></div>
+        <div class="stat"><div class="k">Build (git)</div><div class="v" id="stBuild">—</div></div>
       </div>
       <p class="note logonly">Polls/s ≈ 250 expected; it's capped by Loop period (≈4000 µs needed). "Slowest stage" is the loop section eating the most time per iteration.</p>
       <div class="row" style="margin:10px 0 0"><button id="hapClear">Clear stuck buzz</button>
         <span class="note" style="flex:1">If the controller's haptics get stuck/buzzing, this re-inits them (same as pressing Steam).</span>
+      </div>
+      <div class="row" style="margin:10px 0 0"><button id="ctlrOff">Turn off controller</button>
+        <span class="note" style="flex:1">Fires the controller power-off (0x9F "off!", x3) — the same path Steam's "turn off controller" and host-suspend use. Watch the link status to see it disconnect.</span>
+      </div>
+      <div class="row" style="margin:18px 0 0;border-top:1px solid #4a2030;padding-top:14px">
+        <button id="factoryErase" style="background:#3a1420;border-color:#7a2233;color:#ff9bb0;font-weight:600">⚠ Factory erase</button>
+        <span class="note" style="flex:1"><strong style="color:#ff9bb0">Danger:</strong> wipes <em>all</em> persistent storage on the copycat — the paired controller bond <em>and</em> every saved setting (mode, chords, back-paddle map, sensitivity). The copycat reboots to factory defaults and you must <strong>re-pair the controller</strong>. This cannot be undone.</span>
       </div>
     </div>
 
@@ -217,7 +227,11 @@ function applyBlob(p){
   for(const b of document.querySelectorAll(".modebtn")) b.classList.toggle("active", +b.dataset.mode===mode);
   $("#mouseCard").style.opacity = (mode===1||mode===3)?1:0.5;
   // status
+  const battery=(p.length>36?p[36]:0);                    // controller battery % (report 0x43); 0 = unknown
+  const rssi=(p.length>37?p[37]:0);                       // RAW signal strength |dBm| (0 = no sample)
   $("#stLink").innerHTML = up? '<span class="pill up">up</span>' : '<span class="pill dn">down</span>';
+  $("#stBatt").textContent = (up && battery)? battery+"%" : "—";
+  $("#stRssi").textContent = (up && rssi)? ("-"+rssi+" dBm") : "—";
   $("#stSlot").textContent = slot===0xFF? "—" : slot;
   $("#stRate").textContent = up? f1+" /s" : "—";
   $("#stNew").textContent = up? newps+" /s" : "—";
@@ -225,6 +239,13 @@ function applyBlob(p){
   $("#stLoop").textContent = loopUs? loopUs+" µs" : "—";
   $("#stWorst").textContent = loopUs? (WORST[worstIdx]||worstIdx)+" "+worstUs+"µs" : "—";
   $("#stPollPer").textContent = up? (pollUs+" / "+pollIntended+" µs") : "—";
+  // build provenance (protocol v4+): dirty flag at p[38], 12-byte NUL-padded git hash at p[39..50]. Independent
+  // of link state. Older firmware sends a shorter blob -> stays "—".
+  const gitDirty=(p.length>38?p[38]:0); let gitHash="";
+  for(let i=39;i<51 && i<p.length && p[i];i++) gitHash+=String.fromCharCode(p[i]);
+  $("#stBuild").innerHTML = gitHash
+    ? (gitHash + (gitDirty ? ' <span class="pill dn">dirty</span>' : ' <span class="pill up">clean</span>'))
+    : "—";
   // sliders (only if not being dragged)
   setSlider("mDiv",mDiv); setSlider("mFric",mFric);
   $("#abSwap").textContent = abSwap? "on":"off"; $("#abSwap").classList.toggle("active",!!abSwap);
@@ -321,6 +342,18 @@ $("#capDl").onclick=downloadCap;
 $("#capStart").onclick=startCapture;
 $("#capStop").onclick=stopCapture;
 $("#hapClear").onclick=async()=>{ if(dev){ await send([0x07]); log("haptic re-init sent (clear stuck buzz)"); } };
+$("#ctlrOff").onclick=async()=>{ if(dev){ await send([0x08]); log("controller power-off attempt sent — watch link status"); } };
+$("#factoryErase").onclick=async()=>{
+  if(!dev){ log("not connected"); return; }
+  // Triple gate so this is impossible to fire accidentally: warn, warn harder, then require typing ERASE.
+  if(!confirm("Factory erase?\n\nThis wipes ALL persistent storage on the copycat:\n  • the paired-controller bond (you'll have to re-pair)\n  • every saved setting (mode, chords, back paddles, sensitivity)\n\nThe copycat reboots to factory defaults. This CANNOT be undone.")) return;
+  if(!confirm("Are you absolutely sure?\n\nThere is no recovery. The controller bond and all settings will be gone.")) return;
+  const typed=prompt('Final confirmation — type  ERASE  (all caps) to wipe everything:');
+  if(typed!=="ERASE"){ log("factory erase cancelled (confirmation text did not match)"); return; }
+  // op 0x0A + magic "ERS" (0x45,0x52,0x53) -- firmware reformats the FS and reboots; the device drops off USB.
+  await send([0x0A,0x45,0x52,0x53]);
+  log("FACTORY ERASE sent — copycat is reformatting and rebooting to defaults. Re-pair the controller, then reconnect.");
+};
 $("#abSwap").onclick=()=>{ const on=$("#abSwap").classList.contains("active"); setField(4, on?0:1); };
 $("#persistMode").onclick=()=>{ const on=$("#persistMode").classList.contains("active"); setField(16, on?0:1); };
 for(const id of ["mDiv","mFric"]){

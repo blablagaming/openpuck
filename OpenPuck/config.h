@@ -16,6 +16,17 @@
 #define OPK_LOG 0
 #endif
 
+// Build-time FACTORY RESET (recovery build). 0 (default) = normal. Build with -DOPK_FACTORY_RESET=1 to produce a
+// firmware that wipes ALL persistent storage (cfg.bin + bonds.bin) ONCE -- on the first boot after flashing --
+// then behaves exactly like a normal build that persists settings. It is NOT a wipe-every-boot image: a git-hash
+// tag file (written after the wipe) records that this build already did its one-time reset, so subsequent boots
+// skip it. This makes it a safe recovery image for a bad config/bond: flash it, boot once (cleaned), keep using
+// it. Flashing a DIFFERENT build re-triggers the one-time wipe; for an on-demand wipe use the serial "ERASE-ALL"
+// or WebUSB "Factory erase". Re-pair the controller after the reset. See factoryResetOnce() in config.cpp.
+#ifndef OPK_FACTORY_RESET
+#define OPK_FACTORY_RESET 0
+#endif
+
 // ---- USB presentation modes (g_usbMode). RF poll/relay is identical across all; only USB enumeration +
 //      report mapping differ. ----
 #define MODE_STEAM   0   // Valve puck; auto-lizard when Steam closed
@@ -65,6 +76,13 @@ extern uint16_t g_loopWorstUs;
 
 void loadCfg();
 void saveCfg();
+// FULL factory wipe: reformat the internal LittleFS, erasing cfg.bin (modes/tunables/chords) AND bonds.bin
+// (paired controller). Irreversible; the caller reboots so the next boot comes up on clean defaults and the
+// controller must be re-paired. Gated behind explicit confirmation at every call site.
+void factoryErase();
+// One-time factory reset for the -DOPK_FACTORY_RESET recovery build: wipe ONCE on the first boot after flashing
+// (tracked by a git-hash tag file so it doesn't wipe on every boot), then persist normally. buildTag = OPK_GIT_HASH.
+void factoryResetOnce(const char* buildTag);
 // Mode switch (chord / WebUI): persist mode if the toggle is on, else arm a one-shot so this reboot lands in
 // the new mode but the next cold boot returns to Steam. Either way saveCfg + caller reboots.
 void saveMode(uint8_t m);

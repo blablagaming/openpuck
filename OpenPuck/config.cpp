@@ -1,6 +1,7 @@
 #include "config.h"
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
+#include <string.h>
 using namespace Adafruit_LittleFS_Namespace;
 
 uint8_t g_usbMode = 0;
@@ -64,3 +65,34 @@ void saveMode(uint8_t m){
 }
 
 void armDebugCdcNextBoot(){ g_debugCdc = 1; saveCfg(); }   // next boot keeps CDC; loadCfg() consumes it after
+
+// FULL factory wipe: erase ALL persistent storage in one shot -- cfg.bin (modes/tunables/chords), bonds.bin
+// (the paired-controller record), and anything else living in the internal LittleFS. format() reformats the
+// whole filesystem, so there's nothing left to selectively miss. The caller is expected to reboot immediately
+// (NVIC_SystemReset): on the next boot loadCfg()/loadBonds() find no files and fall back to clean defaults,
+// and the controller must be re-paired. Destructive and irreversible -- gated behind explicit confirmation at
+// every call site (serial "ERASE-ALL", WebUSB op 0x0A magic, both with on-screen warnings).
+void factoryErase(){
+  InternalFS.begin();      // ensure mounted before we reformat (no-op if already up)
+  InternalFS.format();     // wipes cfg.bin + bonds.bin + the entire FS
+}
+
+// One-time factory reset for the -DOPK_FACTORY_RESET recovery build. The point is to clear a bad config/bond
+// ONCE (at the first boot after flashing) and then behave like a normal build that PERSISTS settings -- NOT to
+// wipe on every boot (which would make the board un-configurable). We track "already reset" with a tiny tag file
+// holding the build's git hash, written AFTER the wipe (so it survives in the freshly-formatted FS):
+//   - tag missing or != this build's hash  -> a reset is pending: wipe, then stamp the tag. Next boot persists.
+//   - tag == this build's hash             -> already reset for this build: skip, boot normally.
+// Because the tag is keyed to the git hash, flashing a DIFFERENT build re-triggers the one-time wipe; re-flashing
+// the identical image does not (use the WebUSB/serial erase for an on-demand wipe). buildTag is OPK_GIT_HASH.
+#define RESET_TAG_FILE "/rsttag"
+void factoryResetOnce(const char* buildTag){
+  char tag[24] = {0};
+  { File f(InternalFS);
+    if (f.open(RESET_TAG_FILE, FILE_O_READ)) { int n=f.read((uint8_t*)tag, sizeof tag - 1); if(n>0) tag[n]=0; f.close(); } }
+  if (strncmp(tag, buildTag, sizeof tag - 1) == 0) return;   // this build already did its one-time reset -> persist
+  factoryErase();                                            // wipe cfg.bin + bonds.bin + the old tag
+  InternalFS.begin();                                        // remount the fresh FS
+  File g(InternalFS);                                        // stamp the tag so subsequent boots skip the wipe
+  if (g.open(RESET_TAG_FILE, FILE_O_WRITE)) { g.write((const uint8_t*)buildTag, strlen(buildTag)); g.close(); }
+}

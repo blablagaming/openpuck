@@ -40,6 +40,7 @@ uint16_t g_pollsps = 0;   // polls/s (GET+relay TXs) last second -- distinguishe
 uint16_t g_pollPeriodUs = 0;   // MEASURED avg us between GET-poll fires (vs intended g_pollUs) -- ground truth
 static uint32_t g_pollDtSum = 0; static uint16_t g_pollDtCnt = 0;
 volatile uint8_t g_linkRssi = 0;   // smoothed |dBm| of the controller's replies (0 = none yet)
+volatile uint8_t g_battery  = 0;   // battery % from the controller's report 0x43 (body[1]); 0 = none yet
 
 // ---- internal counters / timers ----
 static uint8_t  g_e3pid = 0;
@@ -131,7 +132,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen, u
   if (NRF_RADIO->EVENTS_END){ NRF_RADIO->EVENTS_END=0;
     bool crcok=NRF_RADIO->CRCSTATUS&1; rxlen=rfrx[0];
     if(!crcok){ g_stCrc++; g_qosBad++; }                // reply arrived but CRC failed -> RF quality (channel/interference)
-    if (crcok && rxlen && rxlen<=64){                   // F1 report ~46B, so allow up to MAXLEN
+    if (crcok && rxlen && rxlen<=96){                   // F1 input ~46B; 0x43-augmented ~66B -> allow up to MAXLEN(96)
       uint8_t rtype=rfrx[2];                            // reply type byte (proven offset from captures)
       // Only OUR controller's replies (F-type: 0xF1 input / 0xF2 disconnect / 0xF3 status) mark the link
       // alive. Every OpenPuck shares the same RF address "ibex" + CRC config, and a puck transmits host-frame
@@ -187,7 +188,13 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen, u
             g_in.lt=trigU8(u16off(rep,4));   g_in.rt=trigU8(u16off(rep,6));   // for the Switch digital-trigger threshold
             g_in.lpx=(int16_t)s16off(rep,16); g_in.lpy=(int16_t)s16off(rep,18);
             g_in.rpx=(int16_t)s16off(rep,22); g_in.rpy=(int16_t)s16off(rep,24);
-            imuFrom45(rep, &g_in.ax,&g_in.ay,&g_in.az,&g_in.gx,&g_in.gy,&g_in.gz);
+            // IMU lives at report bytes 0x22..0x2D (rep[34..45]). Decode it ONLY when a FULL 46-byte report was
+            // actually received -- bounded by `end` (the received length), NOT sizeof(rfrx). The outer gate is
+            // tlen>=28 (enough for buttons/sticks/pads, which end at rep[27]), so a short 0x45 (button-only, or
+            // one whose IMU tail was lost) still passes it; without this guard imuFrom45 would read STALE bytes
+            // past the received data and clobber g_in's gyro/accel. On a short frame, hold the last good IMU.
+            if(tlen>=46 && (size_t)(idx+2)+46<=(size_t)end)
+              imuFrom45(rep, &g_in.ax,&g_in.ay,&g_in.az,&g_in.gx,&g_in.gy,&g_in.gz);
             // Mode-switch chord (all 4 back + face): don't leak the face press to the host. g_in.buttons stays
             // intact so the chord detector still fires; per-mode builders mask the same bits while back-4 held.
             if((bb&CHORD_BACK4)==CHORD_BACK4)
@@ -196,6 +203,14 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen, u
             // g_in); PUSH modes (Xbox, puck/lizard) build + send their host report here.
             if(g_active) g_active->onReport45(rep, fresh, tlen);
             lastRep=rep; lastTlen=tlen;
+          }
+          else if(ttype==6 && (size_t)(idx+2)+tlen<=sizeof(rfrx) && tlen>=2 && (rfrx[idx+2]==0x43 || rfrx[idx+2]==0x44)){
+            // Controller STATUS reports (0x43 = periodic power/battery, ~every 2s; 0x44 = status event). The real
+            // puck forwards these to the host verbatim -- that's how Steam reads battery -- but OpenPuck used to
+            // drop everything but 0x45. Forward them (onAuxReport), and snapshot the battery % for the WebUSB panel.
+            const uint8_t* rep=&rfrx[idx+2];                 // [rid][body...]
+            if(rep[0]==0x43 && tlen>=3) g_battery=rep[2];    // 0x43 body[1] (~0x5e=94) reads as battery % (sniff-derived)
+            if(g_active) g_active->onAuxReport(rep[0], rep+1, (uint8_t)(tlen-1));
           }
           idx+=tlen+2;
         }

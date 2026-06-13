@@ -50,6 +50,9 @@ extern volatile uint8_t g_linkRssi;
 // dB to subtract from our raw RSSI magnitude before reporting, to match the real puck's close-range -35dBm
 // (compensates the Pro Micro antenna vs Valve's front-end). Tune against one known-distance reading.
 #define RSSI_DBM_OFFSET 20
+// Battery percent from the controller's periodic report 0x43 (body[1]); 0 = none yet. Surfaced in the WebUSB
+// panel; the raw 0x43 report is also forwarded to Steam verbatim (puck_hid onAuxReport) so Steam reads it itself.
+extern volatile uint8_t g_battery;
 
 // TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.
 // rxWinUs overrides the reply-wait window (0 = use g_rxWin). Pass a tiny value for NO-ACK relays that expect

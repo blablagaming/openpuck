@@ -70,7 +70,7 @@ void setup() {
   // Distinct USB serial PER MODE (must be set AFTER clearConfiguration, which nulls it). Hosts cache USB
   // identity by VID:PID:serial; reusing one serial under a changing VID:PID can make a host refuse the new
   // identity. Steam keeps the exact unit serial (its pairing identity); the others get a 1-char suffix.
-  static const char MODE_SUFFIX[] = {'X','N','L','P','S','G'};   // modes 1..6
+  static const char MODE_SUFFIX[] = {'X','N','L','P','S','G','O'};   // modes 1..7
   if (puckMode) { USBDevice.setSerialDescriptor(g_unit); }
   else { snprintf(g_usbSerial, sizeof g_usbSerial, "%s%c", g_unit, MODE_SUFFIX[g_usbMode-1]); USBDevice.setSerialDescriptor(g_usbSerial); }
 
@@ -92,7 +92,7 @@ void setup() {
   if (USBDevice.suspended()){ USBDevice.remoteWakeup(); ledWakePulse(); }   // wake host if bus was sleeping when we (re-)attached
   loadBonds();
   hapticInit();   // clear relay/active flags + arm the reconnect block & initial stop burst
-  static const char* MODE_NAME[]={"STEAM(puck)","XBOX(xinput+mouse)","SWITCH(horipad)","LIZARD(puck kb/mouse)","SWITCH(pro+gyro)","PS5(dualsense)","HIDGYRO(ds4+motion)"};
+  static const char* MODE_NAME[]={"STEAM(puck)","XBOX(xinput+mouse)","SWITCH(horipad)","LIZARD(puck kb/mouse)","SWITCH(pro+gyro)","PS5(dualsense)","HIDGYRO(ds4+motion)","XBOXONE(hid+mouse)"};
   Serial.printf("# copycat up: unit=%s board=%s, mode=%s\n", g_unit, g_board, MODE_NAME[g_usbMode<=MODE_MAX?g_usbMode:0]);
   if (puckMode) Serial.printf("# puck USB: %s\n", keepCdc ? "DEBUG boot (CDC console on, wake mouse off; reverts next boot)" : "normal (CDC off, wake mouse on)");
   Serial.printf("# session addr %02X%02X%02X%02X/%02X ch%u (discovery on ibex/ch2)\n",

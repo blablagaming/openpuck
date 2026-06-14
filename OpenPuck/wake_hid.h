@@ -15,5 +15,4 @@
 // debug boot, where CDC is kept and this interface is skipped (no endpoint room for both) -- see config.h
 // (g_debugCdcThisBoot) and ARCHITECTURE.md.
 #pragma once
-
 void wakeHidBegin();   // register the boot-keyboard wake interface (call from setup() for clean modes)

@@ -38,16 +38,15 @@ void rfLizard(const uint8_t* r, Adafruit_USBD_HID* mdev, Adafruit_USBD_HID* kdev
   LZK(b&TB_B,    HID_KEY_ESCAPE);
   LZK(b&TB_X,    HID_KEY_PAGE_UP);
   LZK(b&TB_Y,    HID_KEY_PAGE_DOWN);
-  LZK(b&TB_VIEW, HID_KEY_TAB);
-  LZK(b&TB_MENU, HID_KEY_ESCAPE);
+  LZK(b&TB_VIEW, HID_KEY_ESCAPE);
+  LZK(b&TB_MENU, HID_KEY_TAB);
   int sx=s16off(r,8), sy=s16off(r,10);   // left stick (XInput sign: +Y = up); deflect ~37% acts as a d-pad
   LZK((b&TB_DUP)||sy> 12000, HID_KEY_ARROW_UP);
   LZK((b&TB_DDN)||sy<-12000, HID_KEY_ARROW_DOWN);
   LZK((b&TB_DLF)||sx<-12000, HID_KEY_ARROW_LEFT);
   LZK((b&TB_DRT)||sx> 12000, HID_KEY_ARROW_RIGHT);
   #undef LZK
-  // --- LB = Alt+Tab ---
-  if(b&TB_LB){ mod|=KEYBOARD_MODIFIER_LEFTALT; kc[0]=HID_KEY_TAB; kc[1]=0; kc[2]=0; kc[3]=0; kc[4]=0; kc[5]=0; nk=1; }
+  if(b&TB_LB) mod|=KEYBOARD_MODIFIER_LEFTCTRL;
   // --- Steam/QAM chords ---
   { static bool prevL5=false, prevR5=false;
     bool mh = (b & (TB_STEAM|TB_MENU)) != 0;

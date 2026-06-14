@@ -270,8 +270,14 @@ static void wakeNudgeTask(){
 // connected. Without it Steam shows disconnected even though 0x45 input is streaming.
 void SteamPuckController::task(){
   wakeNudgeTask();
-  { static bool wasSusp=false; bool susp=USBDevice.suspended();   // stamp the suspended->active edge for the post-resume mute
+  { static bool wasSusp=false; bool susp=USBDevice.suspended();
     if(wasSusp && !susp) g_resumeMs=millis();
+    // Delayed shutdown on host sleep: arm 3s timer on suspend edge, cancel on resume. Prevents transient
+    // suspend/resume cycles during system wake from killing the controller.
+    static unsigned long shutAt=0;
+    if(susp && !wasSusp) shutAt=millis()+3000u;
+    if(!susp && wasSusp) shutAt=0;
+    if(susp && shutAt && (int32_t)(millis()-shutAt)>=0){ shutAt=0; hapticSendShutdown(); }
     wasSusp=susp; }
   if (USBDevice.suspended()) return;   // no periodic 0x79/0x7B while the host sleeps -- those sends can wake it too
   static bool usbConn=false; static unsigned long last79=0, last7B=0, connEdgeMs=0;

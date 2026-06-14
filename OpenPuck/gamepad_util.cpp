@@ -61,6 +61,7 @@ static void psOrBackCode(uint32_t* b, uint8_t c){
 }
 uint32_t psButtonsFromSteam(uint32_t raw){
   uint32_t b=raw;
+  if(g_qamMap && (b&TB_MENU)){ b &= ~(uint32_t)TB_MENU; b |= tritonFromCode(g_qamMap); }
   if((b&CHORD_BACK4)==CHORD_BACK4) b&=~(uint32_t)(TB_A|TB_B|TB_X|TB_Y);
   if(b&TB_L4) psOrBackCode(&b, g_back[0]); if(b&TB_R4) psOrBackCode(&b, g_back[1]);
   if(b&TB_L5) psOrBackCode(&b, g_back[2]); if(b&TB_R5) psOrBackCode(&b, g_back[3]);

@@ -1,5 +1,6 @@
 #include "mode_switch_pro.h"
 #include "triton.h"
+#include "gamepad_util.h"
 #include "config.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
@@ -64,6 +65,7 @@ static void jcPackStick(uint8_t s[3], int16_t x, int16_t y){   // pack two 12-bi
 static uint8_t g_jcTimer=0;
 static void jcInputPrefix(uint8_t* out){
   uint32_t b=g_in.buttons;
+  if(g_qamMap && (b&TB_MENU)){ b &= ~(uint32_t)TB_MENU; b |= tritonFromCode(g_qamMap); }
   if((b&CHORD_BACK4)==CHORD_BACK4) b&=~(uint32_t)(TB_A|TB_B|TB_X|TB_Y);
   uint32_t fA=g_abSwap?JC_BTN_B:JC_BTN_A, fB=g_abSwap?JC_BTN_A:JC_BTN_B;
   uint32_t fX=g_abSwap?JC_BTN_Y:JC_BTN_X, fY=g_abSwap?JC_BTN_X:JC_BTN_Y;

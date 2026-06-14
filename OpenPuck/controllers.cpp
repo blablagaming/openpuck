@@ -6,7 +6,6 @@
 #include "mode_switch_pro.h"
 #include "mode_ps5.h"
 #include "mode_hidgyro.h"
-#include "mode_xboxone.h"
 
 IController* g_active = nullptr;
 
@@ -22,7 +21,6 @@ IController* controllerFor(uint8_t mode){
     case MODE_SW_PRO:  return &g_switchPro;
     case MODE_PS5:     return &g_ps5Ctl;
     case MODE_HIDGYRO: return &g_hidGyroCtl;
-    case MODE_XBOXONE: return &g_xboxOneCtl;
     default:           return &g_steamPuck;
   }
 }

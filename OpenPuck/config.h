@@ -36,8 +36,7 @@
 #define MODE_SW_PRO  4   // Nintendo Switch Pro Controller (057E:2009) + gyro
 #define MODE_PS5     5   // Sony DualSense (054C:0CE6) + gyro + split trackpad
 #define MODE_HIDGYRO 6   // DS4-layout generic HID gamepad + gyro (Fortnite-friendly)
-#define MODE_XBOXONE 7   // Xbox Series X|S HID gamepad + right-pad mouse (guide button works on Windows)
-#define MODE_MAX     7
+#define MODE_MAX     6
 
 static inline bool modeIsPuck(uint8_t m){ return m==MODE_STEAM || m==MODE_LIZARD; }
 static inline bool modeValid(uint8_t m){ return m<=MODE_MAX; }

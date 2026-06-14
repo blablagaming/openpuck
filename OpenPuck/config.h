@@ -61,6 +61,7 @@ void armDebugCdcNextBoot();          // persist the one-shot (caller reboots)
 
 // persisted, runtime-tunable config:
 extern int     g_mDiv, g_mFric; // xbox/lizard mouse sensitivity divisor / friction%
+
 extern uint8_t g_abSwap;        // 1 = swap A/B and X/Y (Nintendo face-button layout)
 extern uint8_t g_back[4];       // back paddles L4,R4,L5,R5 -> button codes (0..11 buttons, 12..15 D-pad U/D/L/R)
 

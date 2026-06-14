@@ -243,6 +243,7 @@ function applyBlob(p){
   // of link state. Older firmware sends a shorter blob -> stays "—".
   const gitDirty=(p.length>38?p[38]:0); let gitHash="";
   for(let i=39;i<51 && i<p.length && p[i];i++) gitHash+=String.fromCharCode(p[i]);
+
   $("#stBuild").innerHTML = gitHash
     ? (gitHash + (gitDirty ? ' <span class="pill dn">dirty</span>' : ' <span class="pill up">clean</span>'))
     : "—";

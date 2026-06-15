@@ -6,6 +6,7 @@
 // are here.
 #pragma once
 #include <stdint.h>
+#include "triton.h"
 
 // int16 stick (center 0) -> uint8 (center 0x80), optional axis invert (HID Y is down-positive).
 uint8_t swStick(int16_t v, bool invert);
@@ -22,8 +23,17 @@ void touchPackPads(uint8_t* pts, bool lTouch, bool rTouch, uint16_t lx, uint16_t
 void steamPadsToTouch(uint32_t b, uint16_t touchH, int16_t lpx, int16_t lpy, int16_t rpx, int16_t rpy,
     uint16_t* lx, uint16_t* ly, uint16_t* rx, uint16_t* ry);
 
+// Convert configurable button code -> TB_* flag (shared across modes).
+static inline uint32_t tritonFromCode(uint8_t c){
+  switch(c){ case 1:return TB_A; case 2:return TB_B; case 3:return TB_X; case 4:return TB_Y;
+    case 5:return TB_LB; case 6:return TB_RB; case 7:return TB_L3; case 8:return TB_R3;
+    case 9:return TB_VIEW; case 10:return TB_MENU; case 11:return TB_STEAM;
+    case 12:return TB_DUP; case 13:return TB_DDN; case 14:return TB_DLF; case 15:return TB_DRT;
+    case 16:return TB_TOUCH; case 17:return TB_MUTE; default:return 0; }
+}
+
 // PlayStation-layout button packing (shared by mode_ps5 + mode_hidgyro).
-uint32_t psButtonsFromSteam(uint32_t raw);   // apply back-paddle + chord-guard remapping
+uint32_t psButtonsFromSteam(uint32_t raw);   // apply back-paddle + chord-guard + QAM remapping
 uint8_t  psShouldersByte(uint32_t b);        // L1..R3 + Create/Options byte
 uint8_t  psHatNibble(uint32_t b);            // d-pad -> 8-way hat (8 = neutral)
 uint8_t  psFaceNibble(uint32_t b);           // face buttons (with A/B + X/Y swap)

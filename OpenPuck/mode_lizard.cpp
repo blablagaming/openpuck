@@ -1,9 +1,11 @@
 #include "mode_lizard.h"
 #include "triton.h"
 #include "config.h"
+#include "gamepad_util.h"
 
 void rfLizard(const uint8_t* r, Adafruit_USBD_HID* mdev, Adafruit_USBD_HID* kdev, uint8_t mrid, uint8_t krid){
   uint32_t b=btnsOf(r);
+  if(g_qamMap && (b&TB_MENU)){ b &= ~(uint32_t)TB_MENU; b |= tritonFromCode(g_qamMap); }
   // --- right pad -> mouse motion with glide (mirrors mode_xinput's rfXboxMouse) ---
   static int prx=0,pry=0; static bool prt=false; static float vx=0,vy=0,rmx=0,rmy=0;
   bool rtouch=b&TB_RPADT; int rx=s16off(r,22), ry=s16off(r,24);

@@ -23,7 +23,7 @@ static void webusbSendBlob(){
   uint8_t p[2+WB_PAYLEN];
   p[0]=0xA5; p[1]=WB_PAYLEN;
   p[2]=4;                          // protocol version (4 = +battery/rssi/git; 2 = chordBtn[3])
-  p[3]=g_usbMode; p[4]=(uint8_t)g_mDiv; p[5]=(uint8_t)g_mFric; p[6]=0 /*rsvd: ex-padSmooth*/; p[7]=g_abSwap;
+  p[3]=g_usbMode; p[4]=(uint8_t)g_mDiv; p[5]=(uint8_t)g_mFric; p[6]=g_qamMap; p[7]=g_abSwap;
   p[8]=g_back[0]; p[9]=g_back[1]; p[10]=g_back[2]; p[11]=g_back[3];
   p[12]=(g_connSlot>=0)?(uint8_t)g_connSlot:0xFF;
   p[13]=up?1:0;
@@ -116,6 +116,7 @@ void webusbPoll(){
           case 16: g_persistMode = v?true:false; break;   // persist last mode across reboots (else always boot Steam)
           case 17: case 18: case 19: if(modeValid(v)) g_chordBtn[f-17]=v; break;   // back4+B/X/Y mode assignments
           case 20: armDebugCdcNextBoot(); usb_web.flush(); delay(40); NVIC_SystemReset(); break;  // reboot once WITH the CDC serial console (puck mode), then auto-revert
+          case 21: g_qamMap = v; break;   // QAM physical button remap code (0=default/unmapped)
         }
         if(persist) saveCfg();
         webusbSendBlob();

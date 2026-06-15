@@ -1,5 +1,6 @@
 #include "mode_xinput.h"
 #include "triton.h"
+#include "gamepad_util.h"
 #include "config.h"
 #include "haptics.h"
 #include "bonds.h"
@@ -105,6 +106,7 @@ static uint16_t codeToXB(uint8_t c){
 }
 static void rfXboxGamepad(const uint8_t* r){
   uint32_t b=btnsOf(r);
+  if(g_qamMap && (b&TB_MENU)){ b &= ~(uint32_t)TB_MENU; b |= tritonFromCode(g_qamMap); }
   uint16_t btn=0;                                   // map Triton buttons -> XInput button word
   if(b&TB_DUP)btn|=XB_DUP;   if(b&TB_DDN)btn|=XB_DDOWN; if(b&TB_DLF)btn|=XB_DLEFT; if(b&TB_DRT)btn|=XB_DRIGHT;
   if(b&TB_VIEW)btn|=XB_START; if(b&TB_MENU)btn|=XB_BACK; if(b&TB_STEAM)btn|=XB_GUIDE;

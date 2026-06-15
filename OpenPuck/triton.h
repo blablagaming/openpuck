@@ -29,6 +29,8 @@
 #define TB_LB     0x80000u
 #define TB_RPADT  0x200000u
 #define TB_RPADC  0x400000u
+#define TB_TOUCH  0x100000u      // virtual: PS Touch Click (back-paddle/QAM target, not a real Triton button)
+#define TB_MUTE   0x1000000u     // virtual: PS5 Mute button (back-paddle/QAM target, not a real Triton button)
 #define TB_LPADT  0x2000000u
 #define TB_LPADC  0x4000000u
 

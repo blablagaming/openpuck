@@ -27,7 +27,7 @@ void steamPadsToTouch(uint32_t b, uint16_t touchH, int16_t lpx, int16_t lpy, int
 static inline uint32_t tritonFromCode(uint8_t c){
   switch(c){ case 1:return TB_A; case 2:return TB_B; case 3:return TB_X; case 4:return TB_Y;
     case 5:return TB_LB; case 6:return TB_RB; case 7:return TB_L3; case 8:return TB_R3;
-    case 9:return TB_VIEW; case 10:return TB_MENU; case 11:return TB_STEAM;
+    case 9:return TB_VIEW; case 10:return TB_QAM; case 11:return TB_STEAM;
     case 12:return TB_DUP; case 13:return TB_DDN; case 14:return TB_DLF; case 15:return TB_DRT;
     case 16:return TB_TOUCH; case 17:return TB_MUTE; default:return 0; }
 }

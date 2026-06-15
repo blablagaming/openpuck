@@ -38,7 +38,7 @@ static inline void backCodeToHatDirs(uint8_t c, bool& u, bool& d, bool& l, bool&
 // HORIPAD/Switch button bits: Y=1 B=2 A=4 X=8 L=10 R=20 ZL=40 ZR=80 Minus=100 Plus=200 LClick=400 RClick=800 Home=1000 Capture=2000
 static void switchBuildHoripad(uint8_t out[8]){
   uint32_t b=g_in.buttons; uint16_t btn=0;
-  if(g_qamMap && (b&TB_MENU)){ b &= ~(uint32_t)TB_MENU; b |= tritonFromCode(g_qamMap); }
+  if(g_qamMap && (b&TB_QAM)){ b &= ~(uint32_t)TB_QAM; b |= tritonFromCode(g_qamMap); }
   // Mode-switch chord (all 4 back + A/X/Y): don't pass the face press to the console while the back-4 are held.
   if((b&CHORD_BACK4)==CHORD_BACK4) b &= ~(uint32_t)(TB_A|TB_X|TB_Y);
   // face buttons with optional A/B + X/Y swap (Nintendo physical-vs-label layout)

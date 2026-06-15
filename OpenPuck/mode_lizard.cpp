@@ -1,11 +1,10 @@
 #include "mode_lizard.h"
 #include "triton.h"
 #include "config.h"
-#include "gamepad_util.h"
 
 void rfLizard(const uint8_t* r, Adafruit_USBD_HID* mdev, Adafruit_USBD_HID* kdev, uint8_t mrid, uint8_t krid){
   uint32_t b=btnsOf(r);
-  if(g_qamMap && (b&TB_MENU)){ b &= ~(uint32_t)TB_MENU; b |= tritonFromCode(g_qamMap); }
+  bool qamHeld = (b & TB_QAM) != 0;
   // --- right pad -> mouse motion with glide (mirrors mode_xinput's rfXboxMouse) ---
   static int prx=0,pry=0; static bool prt=false; static float vx=0,vy=0,rmx=0,rmy=0;
   bool rtouch=b&TB_RPADT; int rx=s16off(r,22), ry=s16off(r,24);
@@ -51,7 +50,7 @@ void rfLizard(const uint8_t* r, Adafruit_USBD_HID* mdev, Adafruit_USBD_HID* kdev
   #undef LZK
   if(g_usbMode == MODE_LIZARD){
     static bool prevL5=false, prevR5=false;
-    bool mh = (b & (TB_STEAM|TB_MENU)) != 0;
+    bool mh = (b & TB_STEAM) || qamHeld;
     bool nL5 = mh && (b & TB_L5), nR5 = mh && (b & TB_R5);
     if (nL5 && !prevL5){ uint8_t cc=0x02; if(mdev->ready()) mdev->sendReport(0x03,&cc,1); }
     if (nR5 && !prevR5){ uint8_t cc=0x01; if(mdev->ready()) mdev->sendReport(0x03,&cc,1); }

@@ -12,6 +12,7 @@
 #define TB_B      0x2u
 #define TB_X      0x4u
 #define TB_Y      0x8u
+#define TB_QAM    0x10u
 #define TB_R3     0x20u
 #define TB_VIEW   0x40u
 #define TB_R4     0x80u

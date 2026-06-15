@@ -55,13 +55,13 @@ void steamPadsToTouch(uint32_t b, uint16_t touchH, int16_t lpx, int16_t lpy, int
 static void psOrBackCode(uint32_t* b, uint8_t c){
   switch(c){ case 1:*b|=TB_A; break; case 2:*b|=TB_B; break; case 3:*b|=TB_X; break; case 4:*b|=TB_Y; break;
     case 5:*b|=TB_LB; break; case 6:*b|=TB_RB; break; case 7:*b|=TB_L3; break; case 8:*b|=TB_R3; break;
-    case 9:*b|=TB_VIEW; break; case 10:*b|=TB_MENU; break; case 11:*b|=TB_STEAM; break;
+    case 9:*b|=TB_VIEW; break; case 10:*b|=TB_QAM; break; case 11:*b|=TB_STEAM; break;
     case 12:*b|=TB_DUP; break; case 13:*b|=TB_DDN; break; case 14:*b|=TB_DLF; break; case 15:*b|=TB_DRT; break;
     case 16:*b|=TB_TOUCH; break; case 17:*b|=TB_MUTE; break; default: break; }
 }
 uint32_t psButtonsFromSteam(uint32_t raw){
   uint32_t b=raw;
-  if(g_qamMap && (b&TB_MENU)){ b &= ~(uint32_t)TB_MENU; b |= tritonFromCode(g_qamMap); }
+  if(g_qamMap && (b&TB_QAM)){ b &= ~(uint32_t)TB_QAM; b |= tritonFromCode(g_qamMap); }
   if((b&CHORD_BACK4)==CHORD_BACK4) b&=~(uint32_t)(TB_A|TB_B|TB_X|TB_Y);
   if(b&TB_L4) psOrBackCode(&b, g_back[0]); if(b&TB_R4) psOrBackCode(&b, g_back[1]);
   if(b&TB_L5) psOrBackCode(&b, g_back[2]); if(b&TB_R5) psOrBackCode(&b, g_back[3]);

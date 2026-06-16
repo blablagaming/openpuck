@@ -74,16 +74,19 @@ void setup() {
   if (puckMode) { USBDevice.setSerialDescriptor(g_unit); }
   else { snprintf(g_usbSerial, sizeof g_usbSerial, "%s%c", g_unit, MODE_SUFFIX[g_usbMode-1]); USBDevice.setSerialDescriptor(g_usbSerial); }
 
+  // SDL3's Proteus/Triton HIDAPI driver only binds slot HIDs on USB interfaces 2..5. Register WebUSB (IF 0)
+  // and the wake mouse (IF 1) before the four puck slots so hid[0..3] land on IF 2..5 like the real puck.
+  if (puckMode) usb_web.begin();
+  if (puckMode && !keepCdc) wakeHidBegin();
+
   g_active->begin();   // register this mode's USB interface(s) + set VID/PID/strings
 
-  // Boot-mouse wake interface so the host honors USBDevice.remoteWakeup() in this mode (see wake_hid.h).
-  // Added for every clean mode, and for puck mode on a normal (CDC-dropped) boot. Skipped only on the one-shot
-  // debug boot, where CDC takes the endpoint instead.
-  if (!keepCdc) wakeHidBegin();
+  // Boot-mouse wake interface for clean (non-puck) modes, and for puck on the one-shot debug boot (CDC on,
+  // no endpoint room for wake mouse on a normal puck boot -- wake is registered above instead).
+  if (!puckMode && !keepCdc) wakeHidBegin();
 
-  // WebUSB config panel -- every mode. Puck: historical CDC+HID+vendor stack (Steam + Chrome can share it).
-  // Clean modes: bare gamepad + WebUSB (begin() sets bcdUSB 0x0210 + BOS).
-  usb_web.begin();
+  // WebUSB config panel -- every mode. Puck: registered above (IF 0) before wake + slots; clean modes after controller.
+  if (!puckMode) usb_web.begin();
   // Enable USB Remote Wakeup (bit 5) so the host lets us signal wake-from-sleep. Bit 7 is always required.
   USBDevice.setConfigurationAttribute(0x80 | 0x20);  // bmAttributes: required(0x80) | remote_wakeup(0x20)
   USBDevice.attach();   // re-connect with the final descriptor (host re-reads it fresh -> deterministic enumeration)

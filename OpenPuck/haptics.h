@@ -1,6 +1,6 @@
 // haptics.h -- host -> controller relay queue (haptics + settings) + the watchdogs that stop a stuck buzz.
 //
-// Steam (and legacy XInput rumble) send OUTPUT/feature reports the real dongle forwards to the controller as
+// Steam and translated host rumble send OUTPUT/feature reports the real dongle forwards to the controller as
 // a SET sub-TLV inside the E3 poll. We do the same: handleSet()/the console enqueue with relayEnqueue(), and
 // rfConnFlushRelay() emits ONE entry per poll cycle (rf_link.cpp), never at raw loop rate.
 //
@@ -43,7 +43,7 @@
 // cmd 0x9F, payload "off!" -- captured from the real puck). Sent as a small burst because the RF relay is NO-ACK.
 #define HAPTIC_SHUTDOWN_SHOTS 3u
 
-// ---- relay queue (written by puck_hid.cpp, mode_xinput.cpp, serial_console.cpp; drained by rf_link.cpp) ----
+// ---- relay queue (written by puck_hid.cpp, mode_*.cpp, serial_console.cpp; drained by rf_link.cpp) ----
 // Enqueue one host->controller report: rid = report/command id, payload = the bytes AFTER [cmd][len] (what
 // goes on the air). ISR-safe (brief PRIMASK critical section). Returns false (dropped) when the ring is full.
 bool relayEnqueue(uint8_t rid, const uint8_t* payload, uint8_t plen);
@@ -75,6 +75,7 @@ bool hapticLinkUp();
 bool haptic82Blocked();
 bool hapticRelaySlotOk(int slot);
 void haptic82HostReport(const uint8_t* p, uint16_t n);
+bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq);   // queue Steam/Triton output report 0x80 rumble
 
 // queue + flush the pending host/test/stop relay inside the poll cadence (called from rf_link).
 // rfConnFlushRelay's s1 must carry a PID distinct from the GET poll that follows it (rf_link cycles the shared

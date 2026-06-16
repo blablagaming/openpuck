@@ -2,6 +2,7 @@
 #include "triton.h"
 #include "gamepad_util.h"
 #include "config.h"
+#include "haptics.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -23,6 +24,16 @@ static const uint8_t GYRO_HID_DESC[]={
 #define DS4_STATUS_USB 0x1B   // cable + level 11 (full)
 static unsigned long g_gyroLastMs=0;
 static Adafruit_USBD_HID g_hidGyro;
+
+static void hidGyroSet(uint8_t rid, hid_report_type_t type, uint8_t const* b, uint16_t n){
+  if(type!=HID_REPORT_TYPE_OUTPUT || n<1) return;
+  uint8_t id; const uint8_t* p; uint16_t pn;
+  if(rid==0){ id=b[0]; p=b+1; pn=(uint16_t)(n-1); }
+  else      { id=rid;  p=b;   pn=n;               }
+  // DS4 USB effects: report 0x05, magic at byte 0, effects block starts at byte 3.
+  if(id!=0x05 || pn<5) return;
+  hapticSteamRumble((uint16_t)p[4]*257u, (uint16_t)p[3]*257u);   // DS4: left=low, right=high
+}
 
 static void hidGyroBuild(uint8_t out[63]){
   uint32_t b=psButtonsFromSteam(g_in.buttons);
@@ -59,6 +70,7 @@ void HidGyroController::begin(){
   USBDevice.setManufacturerDescriptor("Sony Computer Entertainment");
   USBDevice.setProductDescriptor("Wireless Controller");
   g_hidGyro.enableOutEndpoint(true);
+  g_hidGyro.setReportCallback(NULL, hidGyroSet);
   g_hidGyro.setReportDescriptor(GYRO_HID_DESC, sizeof GYRO_HID_DESC);
   g_hidGyro.setPollInterval(4);
   g_hidGyro.begin();

@@ -2,6 +2,7 @@
 #include "triton.h"
 #include "gamepad_util.h"
 #include "config.h"
+#include "haptics.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -32,6 +33,45 @@ static const uint8_t PS5_HID_DESC[]={
 static unsigned long g_ps5LastMs=0;
 static Adafruit_USBD_HID g_ps5;
 
+static uint16_t ps5Get(uint8_t rid, hid_report_type_t type, uint8_t* buf, uint16_t reqlen){
+  if(type!=HID_REPORT_TYPE_FEATURE || !buf || reqlen==0) return 0;
+  memset(buf,0,reqlen);
+  switch(rid){
+    case 0x03: {                         // capabilities: identify as DualSense-capable (SDL checks byte 2 == 0x28)
+      if(reqlen<47) return 0;
+      buf[0]=0x00; buf[1]=0x28; buf[2]=0x01; buf[3]=0x00;
+      buf[4]=0x0E;                       // sensors + lightbar + vibration capability bits
+      return 47;
+    }
+    case 0x05: {                         // calibration: neutral-ish non-zero block so SDL's read succeeds
+      uint16_t n = reqlen<40 ? reqlen : 40;
+      for(uint16_t i=0;i<n;i++) buf[i]=0;
+      return n;
+    }
+    case 0x09: {                         // serial number feature
+      uint16_t n = reqlen<20 ? reqlen : 20;
+      for(uint16_t i=0;i<n && i<12;i++) buf[i]=(uint8_t)("010203040506"[i]);
+      return n;
+    }
+    case 0x20: {                         // firmware info
+      uint16_t n = reqlen<63 ? reqlen : 63;
+      buf[0]=0x01; buf[1]=0x00;          // minimal non-zero firmware version
+      return n;
+    }
+    default:
+      return 0;
+  }
+}
+static void ps5Set(uint8_t rid, hid_report_type_t type, uint8_t const* b, uint16_t n){
+  if(type!=HID_REPORT_TYPE_OUTPUT || n<1) return;
+  uint8_t id; const uint8_t* p; uint16_t pn;
+  if(rid==0){ id=b[0]; p=b+1; pn=(uint16_t)(n-1); }
+  else if(rid==0x02 && b[0]==0x02 && n>=5){ id=rid; p=b+1; pn=(uint16_t)(n-1); } // some paths leave report id in b
+  else      { id=rid;  p=b;   pn=n;               }
+  if(id!=0x02 || pn<4) return;
+  hapticSteamRumble((uint16_t)p[3]*257u, (uint16_t)p[2]*257u);   // DualSense: left=low, right=high
+}
+
 static void ps5Build(uint8_t out[63]){
   uint32_t b=psButtonsFromSteam(g_in.buttons);
   bool lTouch=(b&TB_LPADT)||(b&TB_LPADC), rTouch=(b&TB_RPADT)||(b&TB_RPADC);
@@ -61,6 +101,7 @@ void Ps5Controller::begin(){
   USBDevice.setManufacturerDescriptor("Sony Interactive Entertainment");
   USBDevice.setProductDescriptor("DualSense Wireless Controller");
   g_ps5.enableOutEndpoint(true);
+  g_ps5.setReportCallback(ps5Get, ps5Set);
   g_ps5.setReportDescriptor(PS5_HID_DESC, sizeof PS5_HID_DESC);
   g_ps5.setPollInterval(4);
   g_ps5.begin();

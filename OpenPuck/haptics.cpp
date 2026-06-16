@@ -28,6 +28,8 @@ void hapticSendShutdown(){
 
 static unsigned long g_haptic82Ms = 0;     // millis of last 0x82 haptic OUTPUT relayed (Steam mode)
 static bool          g_haptic82On = false; // a non-zero 0x82 haptic is currently active (awaiting host stop)
+static unsigned long g_rumble80Ms = 0;     // millis of last translated host rumble (0x80)
+static bool          g_rumble80On = false; // Steam/Triton rumble is latched on until an explicit zero report
 static unsigned long g_reinitAt = 0;       // when to fire the next post-reconnect haptic re-init (0 = none scheduled)
 static uint8_t       g_reinitLeft = 0;     // how many re-init shots remain in this connect window
 static bool          g_hapClearArmed=false;// haptic activity happened -> arm a clear once it goes idle (catches a
@@ -58,7 +60,7 @@ bool relayEnqueue(uint8_t rid, const uint8_t* payload, uint8_t plen){
   g_rqHead = nx;
   // Any haptic relay (Steam OR Xbox rumble OR test) arms the idle-clear and refreshes its timer -- so the
   // during-use buzz gets cleared in EVERY USB mode, not just Steam. The re-init's own 0x81/0x87 don't match.
-  if (rid==0x82){ g_haptic82Ms = millis(); g_hapClearArmed = true; }
+  if (rid==0x82 || rid==0x80){ g_haptic82Ms = millis(); g_hapClearArmed = true; }
   __set_PRIMASK(pm); return true;
 }
 
@@ -126,11 +128,12 @@ static bool haptic82PayloadOn(const uint8_t* p, uint16_t n){
   for(uint16_t i=2;i<n;i++) if(p[i]) return true;   // observed form is [01 01 gain], but treat any trailing non-zero as active
   return false;
 }
-static void hapticCancelPendingOn(){   // void queued 0x82-ON entries (stale Steam haptics across a reconnect)
+static void hapticCancelPendingOn(){   // void queued ON entries (stale Steam haptics / translated rumble across a reconnect)
   uint32_t pm = __get_PRIMASK(); __disable_irq();
   for(uint8_t i=g_rqTail; i!=g_rqHead; i=rqNext(i)){
     RelayMsg &m = g_rq[i];
     if(m.rid==0x82){ bool on=false; for(uint8_t j=2;j<m.len;j++) if(m.data[j]){on=true;break;} if(on) m.rid=0; }
+    if(m.rid==0x80){ bool on=false; for(uint8_t j=0;j<m.len;j++) if(m.data[j]){on=true;break;} if(on) m.rid=0; }
   }
   __set_PRIMASK(pm);
 }
@@ -143,6 +146,25 @@ void haptic82HostReport(const uint8_t* p, uint16_t n){
   // over. Each 0x82 is a discrete pad click, so the extra frames are exactly the spurious end-of-movement
   // "click"/buzz that the real puck never produces. (Connect-time clearing still runs in hapticTask().)
   g_haptic82On = haptic82PayloadOn(p,n);
+}
+bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq){
+  bool on = lowFreq || highFreq;
+  if(on && haptic82Blocked()) return false;       // same settle gate as native Steam haptics
+  if(!on && !hapticLinkUp()) return false;
+
+  // SDL's current Steam/Triton structs define output report 0x80 as:
+  //   type, uint16 intensity, {uint16 speed, int8 gain} left/right.
+  // We map conventional gamepad low/high-frequency motors to left/right speeds and use max as intensity.
+  uint16_t intensity = lowFreq > highFreq ? lowFreq : highFreq;
+  uint8_t p[9];
+  p[0] = on ? 0x04 : 0x00;   // haptic_type_t::HAPTIC_TYPE_RUMBLE; 0 is the off/zero report
+  p[1] = (uint8_t)(intensity & 0xFF); p[2] = (uint8_t)(intensity >> 8);
+  p[3] = (uint8_t)(lowFreq   & 0xFF); p[4] = (uint8_t)(lowFreq   >> 8); p[5] = 0;
+  p[6] = (uint8_t)(highFreq  & 0xFF); p[7] = (uint8_t)(highFreq  >> 8); p[8] = 0;
+  if(!relayEnqueue(0x80, p, sizeof p)) return false;
+  g_rumble80Ms = millis();
+  g_rumble80On = on;
+  return true;
 }
 // Queue a pending test-haptic / stop relay (runs inside the poll cadence -- never at raw loop rate).
 void rfConnQueueHapticRelay(){
@@ -217,7 +239,7 @@ void hapticReinit(){
   relayEnqueue(0x81, T81B, sizeof T81B);
 }
 void hapticInit(){
-  g_rqHead = g_rqTail = 0; g_haptic82On=false;
+  g_rqHead = g_rqTail = 0; g_haptic82On=false; g_rumble80On=false;
   g_hapticBlockUntil = millis() + HAPTIC_RECONNECT_BLOCK_MS;   // boot: block stale Steam 0x82 until link stable
   // NO fabricated stop burst. USB capture proves Steam only ever sends 0x82 [01 01 f7] pulses -- never a
   // zero-gain [01 01 00] "stop". Injecting our invented stop frame (which the real puck never sends) at
@@ -231,7 +253,7 @@ void hapticInit(){
 // link-up edge. Idempotent -- safe to call repeatedly.
 void hapticOnReconnect(){
   g_hapticBlockUntil = millis() + HAPTIC_RECONNECT_BLOCK_MS;   // no haptics relayed for the next 3s
-  g_haptic82On = false;
+  g_haptic82On = false; g_rumble80On = false;
   hapticCancelPendingOn();                                     // drop any haptic ON queued before the link came up
   // Be PROACTIVE: start re-initing the haptic engine right after the link is up and repeat across the whole
   // settle window, instead of waiting for the block to end. The brief connect buzz engages early (during the
@@ -268,6 +290,7 @@ void hapticTask(){
   // are one-shot pulses, so firing a 0x82-zero ~HAPTIC_QUIET_MS after a swipe ends is the extra end-of-movement
   // click the real puck doesn't make. Steam forwards its own stop for any sustained haptic.
   if (!g_xbox && g_haptic82On && millis()-g_haptic82Ms > HAPTIC_QUIET_MS) g_haptic82On=false;
+  if (g_rumble80On && millis()-g_rumble80Ms > 2500u) hapticSteamRumble(0, 0);
   // Haptic activity has gone idle for a while -> fire one re-init to clear any latch it left behind (the buzz
   // that engages during/after use and won't self-clear, incl. after a mode switch). Fires only after a quiet
   // gap, so it never interrupts active haptics; the brightness-less re-init is silent (settings, no play, no

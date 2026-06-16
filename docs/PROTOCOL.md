@@ -30,7 +30,7 @@ An empty slot is all zeroes.
 
 ### 3.1 Steam-mode USB layout
 
-Steam mode enumerates as Valve `28DE:1304` and exposes four HID interfaces with the same report descriptor as the real puck. Each interface owns one bond slot.
+Steam mode enumerates as Valve `28DE:1142` and exposes four HID interfaces with the same report descriptor as the real puck. Each interface owns one bond slot. The firmware uses the classic Steam Controller dongle PID because SDL's Steam HIDAPI driver reliably treats `0x1142` as the four-slot wireless receiver; newer puck PIDs may work in Steam but are not consistently surfaced as Steam Controllers to SDL apps. SDL also expects the Steam slot HIDs on USB interface numbers 1..4, so WebUSB is registered before the slot HIDs in puck mode to reserve interface 0.
 
 Relevant report IDs:
 
@@ -320,7 +320,7 @@ does a `detach -> rebuild -> attach` so the host re-reads the descriptor cleanly
 
 ### 9.1 Steam mode
 
-- VID:PID `28DE:1304`
+- VID:PID `28DE:1142`
 - Four puck HID interfaces (CDC + WebUSB also present)
 - `0x45` reports are forwarded to the connected slot's HID interface
 - **Seamless lizard**: when Steam is driving the device, `0x45` is forwarded; when it isn't

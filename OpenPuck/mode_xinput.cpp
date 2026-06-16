@@ -25,8 +25,8 @@ enum { XB_DUP=0x0001,XB_DDOWN=0x0002,XB_DLEFT=0x0004,XB_DRIGHT=0x0008, XB_START=
 static uint8_t g_xiItf=0xFF, g_xiEpIn=0, g_xiEpOut=0;
 static uint8_t g_xiInBuf[32], g_xiOutBuf[32];
 
-// legacy XInput rumble strength from the host's OUT packet (0=off); drives the haptic relay
-static volatile uint8_t g_rumble = 0;
+// XInput rumble strengths from the host's OUT packet; translated to Steam/Triton report 0x80.
+static volatile uint16_t g_rumbleLow = 0, g_rumbleHigh = 0;
 static volatile unsigned long g_rumbleMs = 0;   // millis of last rumble OUT packet (stuck-rumble watchdog)
 #define RUMBLE_STUCK_MS 2500u   // release a held rumble if no OUT packet refreshes it for this long (covers a lost stop without cutting normal short rumbles)
 
@@ -54,7 +54,9 @@ static bool xi_xfer(uint8_t rhport,uint8_t ep,xfer_result_t res,uint32_t n){(voi
   if(ep==g_xiEpOut){
     // XInput rumble packet: [00][08][00][bigMotor][smallMotor][00][00][00]; LED pkt is [01][03][led]
     if(n>=5 && g_xiOutBuf[0]==0x00 && g_xiOutBuf[1]==0x08){
-      uint8_t big=g_xiOutBuf[3], sml=g_xiOutBuf[4]; g_rumble = big>sml?big:sml; g_rumbleMs = millis();   // stamp for the stuck-rumble watchdog
+      uint8_t big=g_xiOutBuf[3], sml=g_xiOutBuf[4];
+      g_rumbleLow=(uint16_t)big*257u; g_rumbleHigh=(uint16_t)sml*257u; g_rumbleMs = millis();   // stamp for the stuck-rumble watchdog
+      hapticSteamRumble(g_rumbleLow, g_rumbleHigh);
     }
     usbd_edpt_xfer(rhport,g_xiEpOut,g_xiOutBuf,sizeof g_xiOutBuf);    // re-arm OUT
   }
@@ -143,7 +145,7 @@ static void rfXboxMouse(const uint8_t* r){
 
 // ===================== IController =====================
 void XboxController::begin(){
-  g_rumble=0;
+  g_rumbleLow=g_rumbleHigh=0;
   USBDevice.setID(0x045E, 0x028E);   // device-level 045E:028E match -> Windows xusb / SDL / Linux xpad all bind it
   // bcdDevice 0x0115 (was 0x0114): Windows caches the config descriptor by VID:PID:bcdDevice, so any change to
   // this mode's interfaces (here: the wake-mouse interface) MUST bump bcdDevice or Windows serves a stale
@@ -160,15 +162,10 @@ void XboxController::onReport45(const uint8_t* rep, bool fresh, uint8_t bodyTlen
   (void)fresh; (void)bodyTlen;
   rfXboxGamepad(rep); rfXboxMouse(rep);   // standard gamepad + right-pad mouse (2nd interface)
 }
-// Legacy XInput rumble -> relay the haptic (0x82 [01 01 gain]) to the controller while the host commands it,
-// re-queued ~40/s like Steam's glide haptic so it sustains. Not active in the current HID Xbox presentation.
+// Lost-stop watchdog: Steam/Triton rumble is latched, so force a zero report if the host stops refreshing.
 void XboxController::task(){
-  if (g_rumble && millis()-g_rumbleMs > RUMBLE_STUCK_MS) g_rumble=0;
-  if (g_rumble && !relayPending() && g_connSlot>=0) {
-    static unsigned long lastRumble=0;
-    if (millis()-lastRumble>=25) { lastRumble=millis();
-      uint8_t gain = g_rumble<0x30?0x30:g_rumble;   // floor so low rumble is still feelable
-      uint8_t pl[3]={0x01,0x01,gain}; relayEnqueue(0x82,pl,3);
-    }
+  if ((g_rumbleLow || g_rumbleHigh) && millis()-g_rumbleMs > RUMBLE_STUCK_MS) {
+    g_rumbleLow=g_rumbleHigh=0;
+    hapticSteamRumble(0, 0);
   }
 }

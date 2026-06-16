@@ -13,8 +13,8 @@
 uint8_t g_fwdNewOnly = 1;
 SteamPuckController g_steamPuck;
 
-// ---- cloned puck HID report descriptor (verbatim): mouse(0x40)+keyboard(0x41)+vendor(FF00) with the 63-byte
-//      FEATURE command reports on report id 1/2. Each of the 4 interfaces uses this. ----
+// ---- cloned puck HID report descriptor: mouse(0x40)+keyboard(0x41)+vendor(FF00) with the 63-byte FEATURE
+//      command reports on report id 1/2. Each of the 4 interfaces uses this. ----
 static const uint8_t PUCK_HID_DESC[] = {
   0x05,0x01,0x09,0x02,0xA1,0x01,0x85,0x40,0x09,0x01,0xA1,0x00,0x05,0x09,0x19,0x01,
   0x29,0x02,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x02,0x81,0x02,0x75,0x06,0x95,0x01,
@@ -91,6 +91,7 @@ static bool g_autoLizard = true;            // master switch; false => Steam mod
 // the controller while presenting lizard (Steam isn't reading 0x45 back), Steam loops the same haptic -> buzz.
 static inline bool steamDrivingGamepad(){ return g_steamAliveMs && (millis()-g_steamAliveMs < LIZARD_WD_MS); }
 static inline bool lizardActive(){ return modeIsPuck(g_usbMode) && (g_usbMode==MODE_LIZARD || (g_autoLizard && !steamDrivingGamepad())); }
+static inline void hostStampAlive(){ g_steamAliveMs = millis(); }
 // Right after the host resumes from suspend, MUTE input forwarding briefly. Otherwise the controller's input
 // in that instant (a trackpad click/trigger, or residual button state from the wake gesture) gets forwarded
 // as a real click/keypress into the just-woken desktop -- which was activating the highlighted Start tile
@@ -110,7 +111,7 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type, uint8_t con
     // pushed here -- 0x87 (lizard-off/settings) reaches the controller through the feature-0x01 passthrough path.
     if (rid >= 0x80 && rid <= 0x89) {
       hapLogAdd((uint8_t)slot, rid, b, n);   // capture ALL OUTPUT reports (even un-relayed) for the 'H' dump
-      g_steamAliveMs = millis();   // ANY Steam OUTPUT report (not just the 0x87 heartbeat) means Steam is present and
+      hostStampAlive();   // ANY Steam OUTPUT report (not just the 0x87 heartbeat) means Steam is present and
                                    // driving -> leave lizard for gamepad NOW, so a haptic that arrives before the
                                    // first 0x87 doesn't get relayed while we're still presenting lizard (-> buzz loop).
     }
@@ -138,7 +139,7 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type, uint8_t con
   Slot &S = g_slot[slot];
   uint8_t cmd = b[0], len = (n > 1) ? b[1] : 0;
   const uint8_t *pl = b + 2; uint16_t pln = (n >= 2) ? n - 2 : 0;
-  if (cmd >= 0x80 && cmd <= 0x89) g_steamAliveMs = millis();   // any Steam settings/haptic/LED report (incl. the 0x87 lizard-off heartbeat) -> Steam present, forward gamepad, suppress auto-lizard
+  if (cmd >= 0x80 && cmd <= 0x89) hostStampAlive();   // settings/haptic/LED report (incl. 0x87 lizard-off heartbeat, SDL Triton lizard-disable)
   // Controller power-off: Steam's "turn off controller" is feature-0x01 frame 9F 04 6F 66 66 21 ("off!"),
   // confirmed from a real puck capture. The feature-0x01 relay below forwards it once; hapticSendShutdown()
   // bursts it for NO-ACK reliability (the single hook the test button + host-suspend also drive).
@@ -175,6 +176,7 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type, uint8_t con
       uint8_t idx = pln > 0 ? pl[0] : 1; const char *s = (idx == 0) ? g_board : (idx == 1) ? g_unit : "NA";
       S.resp[0] = 0xAE; S.resp[1] = 0x14; S.resp[2] = idx; memset(S.resp + 3, 0, 60); memcpy(S.resp + 3, s, strlen(s)); S.resp_len = 63; break; }
     case 0xB4:    // connection/version state per slot: value 0x02 = controller connected, 0x01 = not
+      hostStampAlive();   // SDL Triton polls this on init; treat like Steam contact so we forward 0x45
       S.resp[0] = 0xB4; S.resp[1] = 0x01;
       S.resp[2] = (slot == g_connSlot && !g_xbox && (millis() - g_connReplyMs < 500)) ? 0x02 : 0x01;
       S.resp_len = 63; break;
@@ -198,6 +200,7 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type, uint8_t con
 static uint16_t handleGet(int slot, uint8_t rid, hid_report_type_t type, uint8_t *buf, uint16_t reqlen) {
   (void)rid;
   if (type != HID_REPORT_TYPE_FEATURE) return 0;
+  if (g_usbMode == MODE_STEAM) hostStampAlive();   // host reading feature data => gamepad consumer active (Steam/SDL)
   Slot &S = g_slot[slot];
   uint16_t n = S.resp_len ? S.resp_len : 63; if (n > reqlen) n = reqlen;
   memcpy(buf, S.resp, n); return n;
@@ -254,7 +257,7 @@ void SteamPuckController::onReport45(const uint8_t* rep, bool fresh, uint8_t bod
     // FRESH reports (the real puck dedupes -> Steam gets a clean unique stream; sending stale repeats makes
     // Steam's velocity/smoothing stair-step). g_fwdNewOnly toggles for A/B.
     if((fresh || !g_fwdNewOnly) && g_slot[g_connSlot].used && hid[g_connSlot].ready())
-      hid[g_connSlot].sendReport(0x45, rep+1, blen);   // Steam/SDL: input report -> "connected"
+      hid[g_connSlot].sendReport(0x45, rep+1, blen);   // Steam/SDL Triton: input report 0x45
   }
 }
 

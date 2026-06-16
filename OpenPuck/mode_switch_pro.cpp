@@ -81,11 +81,14 @@ static void jcInputPrefix(uint8_t* out){
   if(b&TB_L4)jc|=codeToJc(g_back[0],fA,fB,fX,fY); if(b&TB_R4)jc|=codeToJc(g_back[1],fA,fB,fX,fY);
   if(b&TB_L5)jc|=codeToJc(g_back[2],fA,fB,fX,fY); if(b&TB_R5)jc|=codeToJc(g_back[3],fA,fB,fX,fY);
   out[0]=g_jcTimer++;
-  out[1]=0x81;   // full battery + USB powered (hid-nintendo bat_con)
+  out[1]=0x91;   // battery full+charging (hi nibble 0x9), connection_info=1 (lo nibble): a wired/charging Pro Controller.
+                 // A real Switch reads this to show the pad as connected; Steam/hid-nintendo accept it too. (2wiCC parity)
   out[2]=(uint8_t)(jc); out[3]=(uint8_t)(jc>>8); out[4]=(uint8_t)(jc>>16);
+  out[3]|=0x80;  // charging_grip bit (button "common" byte, bit7): genuine Pro Controller always sets it on USB; real
+                 // Switch uses it to recognise a wired controller. Not a button, so hid-nintendo ignores it.
   jcPackStick(out+5, g_in.lx, g_in.ly);
   jcPackStick(out+8, g_in.rx, g_in.ry);
-  out[11]=0;
+  out[11]=0x09;  // rumble_input_report echo: genuine pad emits 0x09..0x0C; some Switch firmware expects this nonzero.
 }
 static void switchProBuild(uint8_t out[63]){
   memset(out,0,63);
@@ -121,6 +124,18 @@ static void jcBuildStickCal(){
   uint16_t Rr[6]={C,C, R,R, R,R};  // right order: center(x,y), min(x,y), max(x,y)
   jcPack12(&g_spiStickCal[0], L); jcPack12(&g_spiStickCal[9], Rr);
 }
+// Manual-pairing (subcommand 0x01) reply payloads. A real Switch runs this 3-stage BT key exchange over USB so it
+// can register the pad (Steam/hid-nintendo never do, which is why this was previously unneeded). The data is the
+// canonical hid handshake blob; the Switch only validates the shape, not the key contents. Each is the 31-byte
+// reply body that follows the 0x21 input prefix + ack(0x81) + echoed-subcommand(0x01). (adapted from 2wiCC)
+static const uint8_t BT_PAIR_1[31]={   // type 1: echo type + controller BT addr + "Pro Controller" name
+  0x01, JC_MAC[0],JC_MAC[1],JC_MAC[2],JC_MAC[3],JC_MAC[4],JC_MAC[5], 0x00,0x25,0x08,
+  0x50,0x72,0x6F,0x20,0x43,0x6F,0x6E,0x74,0x72,0x6F,0x6C,0x6C,0x65,0x72,   // "Pro Controller"
+  0x00,0x00,0x00,0x00,0x00,0x68};
+static const uint8_t BT_PAIR_2[31]={   // type 2: LTK exchange
+  0x02, 0xE5,0xC8,0xE4,0x92,0x05,0xFF,0xC9,0x8A,0x7D,0xEA,0x15,0xF6,0x19,0xBA,0x82,0x13,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t BT_PAIR_3[31]={0x03};   // type 3: save pairing (all zero body)
 static void spiRead(uint32_t addr, uint8_t len, uint8_t* dst){
   for(uint8_t i=0;i<len;i++){
     uint32_t a=addr+i; uint8_t v=0xFF;
@@ -155,14 +170,20 @@ static void jcSubcmd(uint8_t sub, const uint8_t* args, uint16_t alen){
   jcInputPrefix(p);
   p[13]=sub;
   switch(sub){
+    case 0x01: {                       // manual BT pairing: 3-stage key exchange a real Switch runs over USB
+      const uint8_t* d=BT_PAIR_3; uint8_t t=(alen>=1)?args[0]:3;
+      if(t==1) d=BT_PAIR_1; else if(t==2) d=BT_PAIR_2;
+      p[12]=0x81;                      // pairing ACK
+      memcpy(&p[14], d, 31);
+      break; }
     case 0x02:                         // request device info
       p[12]=0x82;
-      p[14]=0x04; p[15]=0x21;          // firmware version (4.33)
+      p[14]=0x03; p[15]=0x48;          // firmware version 3.72 (genuine Pro Controller value)
       p[16]=0x03;                      // controller type: Pro Controller
       p[17]=0x02;                      // fixed
       memcpy(&p[18], JC_MAC, 6);
       p[24]=0x01;                      // colors stored in SPI (0x6050)
-      p[25]=0x02;                      // fixed
+      p[25]=0x01;                      // fixed
       break;
     case 0x10: {                       // SPI flash read -> echo [addr][len] then the data
       if(alen<5){ p[12]=0x80; break; }
@@ -175,7 +196,10 @@ static void jcSubcmd(uint8_t sub, const uint8_t* args, uint16_t alen){
     case 0x03:                         // set input report mode (0x30 = standard full) -> begin streaming
       if(alen>=1 && args[0]==0x30) g_swProReportMode=0x30;
       p[12]=0x80; break;
-    case 0x04: p[12]=0x83; break;      // trigger buttons elapsed time
+    case 0x04:                         // trigger buttons elapsed time -> canned reply (genuine pad returns data)
+      p[12]=0x83;
+      p[14]=0x00; p[15]=0xCC; p[16]=0x00; p[17]=0xEE; p[18]=0x00; p[19]=0xFF;
+      break;
     case 0x21: p[12]=0xA0; break;      // set NFC/IR config
     default:   p[12]=0x80; break;      // 0x06/0x08/0x30/0x38/0x40/0x41/0x48/... generic positive ACK
   }

@@ -74,6 +74,11 @@ void setup() {
   if (puckMode) { USBDevice.setSerialDescriptor(g_unit); }
   else { snprintf(g_usbSerial, sizeof g_usbSerial, "%s%c", g_unit, MODE_SUFFIX[g_usbMode-1]); USBDevice.setSerialDescriptor(g_usbSerial); }
 
+  // SDL's Steam dongle backend only opens Valve HID interfaces numbered 1..4. Register WebUSB before the
+  // puck slots so the four slot HIDs land on interfaces 1..4 like the real dongle; clean modes keep their
+  // controller interface first so Windows/SDL bind them normally.
+  if (puckMode) usb_web.begin();
+
   g_active->begin();   // register this mode's USB interface(s) + set VID/PID/strings
 
   // Boot-mouse wake interface so the host honors USBDevice.remoteWakeup() in this mode (see wake_hid.h).
@@ -81,9 +86,9 @@ void setup() {
   // debug boot, where CDC takes the endpoint instead.
   if (!keepCdc) wakeHidBegin();
 
-  // WebUSB config panel -- every mode. Puck: historical CDC+HID+vendor stack (Steam + Chrome can share it).
-  // Clean modes: bare gamepad + WebUSB (begin() sets bcdUSB 0x0210 + BOS).
-  usb_web.begin();
+  // WebUSB config panel -- every mode. In puck mode this was registered before the slot HIDs to keep SDL's
+  // expected interface numbers; clean modes register it after the controller/wake interfaces.
+  if (!puckMode) usb_web.begin();
   // Enable USB Remote Wakeup (bit 5) so the host lets us signal wake-from-sleep. Bit 7 is always required.
   USBDevice.setConfigurationAttribute(0x80 | 0x20);  // bmAttributes: required(0x80) | remote_wakeup(0x20)
   USBDevice.attach();   // re-connect with the final descriptor (host re-reads it fresh -> deterministic enumeration)

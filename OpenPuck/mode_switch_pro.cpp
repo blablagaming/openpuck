@@ -2,6 +2,7 @@
 #include "triton.h"
 #include "gamepad_util.h"
 #include "config.h"
+#include "haptics.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -50,6 +51,17 @@ static unsigned long g_swProLastMs=0;
 static Adafruit_USBD_HID g_swPro;
 static uint8_t g_swProReportMode=0;   // 0 until the host's subcommand 0x03 selects 0x30 -> THEN we stream input
 static const uint8_t JC_MAC[6]={0x7C,0xBB,0x8A,0x00,0x00,0x01};   // synthetic but stable controller MAC
+static uint16_t jcRumbleAmp(const uint8_t r[4]){
+  // Nintendo's 4-byte rumble encoding is frequency+amplitude packed through tables. For translation to the
+  // Steam controller, use the amplitude-bearing fields directly and scale them into a 16-bit motor speed.
+  if((r[0]==0x00 && r[1]==0x01 && r[2]==0x40 && r[3]==0x40) || (r[0]==0x00 && r[1]==0x00 && r[2]==0x01 && r[3]==0x40)) return 0;
+  uint16_t amp = ((uint16_t)(r[1] & 0xFE) << 8) | r[3];
+  return amp ? amp : 0x0800;
+}
+static void jcRumble(const uint8_t* p, uint16_t pn){
+  if(pn<9) return;                       // [timer][left rumble x4][right rumble x4]
+  hapticSteamRumble(jcRumbleAmp(p+1), jcRumbleAmp(p+5));
+}
 static int jcStick12(int16_t v, bool inv){   // steam int16 (center 0) -> 12-bit (center 0x800), clamped
   int a = 2048 + (inv ? -((int)v>>4) : ((int)v>>4));
   return a<0?0:(a>4095?4095:a);
@@ -199,9 +211,12 @@ static void jcSet(uint8_t rid, hid_report_type_t type, uint8_t const* b, uint16_
   }
   if(id==0x01){                        // [timer][rumble x8][subcmd][args...]
     if(pn<10) return;
+    jcRumble(p, pn);
     jcSubcmd(p[9], p+10, (pn>10)?(uint16_t)(pn-10):0);
+    return;
   }
-  // report 0x10 (rumble only) / 0x82: ignored
+  if(id==0x10){ jcRumble(p, pn); return; }
+  // report 0x82: ignored
 }
 
 void SwitchProController::begin(){

@@ -2,6 +2,7 @@
 #include "triton.h"
 #include "gamepad_util.h"
 #include "config.h"
+#include "haptics.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -32,6 +33,15 @@ static const uint8_t PS5_HID_DESC[]={
 static unsigned long g_ps5LastMs=0;
 static Adafruit_USBD_HID g_ps5;
 
+static void ps5Set(uint8_t rid, hid_report_type_t type, uint8_t const* b, uint16_t n){
+  if(type!=HID_REPORT_TYPE_OUTPUT || n<1) return;
+  uint8_t id; const uint8_t* p; uint16_t pn;
+  if(rid==0){ id=b[0]; p=b+1; pn=(uint16_t)(n-1); }
+  else      { id=rid;  p=b;   pn=n;               }
+  if(id!=0x02 || pn<4) return;
+  hapticSteamRumble((uint16_t)p[3]*257u, (uint16_t)p[2]*257u);   // DualSense: left=low, right=high
+}
+
 static void ps5Build(uint8_t out[63]){
   uint32_t b=psButtonsFromSteam(g_in.buttons);
   bool lTouch=(b&TB_LPADT)||(b&TB_LPADC), rTouch=(b&TB_RPADT)||(b&TB_RPADC);
@@ -61,6 +71,7 @@ void Ps5Controller::begin(){
   USBDevice.setManufacturerDescriptor("Sony Interactive Entertainment");
   USBDevice.setProductDescriptor("DualSense Wireless Controller");
   g_ps5.enableOutEndpoint(true);
+  g_ps5.setReportCallback(NULL, ps5Set);
   g_ps5.setReportDescriptor(PS5_HID_DESC, sizeof PS5_HID_DESC);
   g_ps5.setPollInterval(4);
   g_ps5.begin();

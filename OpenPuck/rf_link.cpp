@@ -183,6 +183,22 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen, u
             }
             // Decode the report into the shared g_in (one source, read by every IController).
             g_in.buttons=bb;
+            // Global power-off chord: Steam + Y held 2 s -> shut the controller down (any mode). Detect on the raw
+            // `bb` (pre-mask), time-based (poll rate varies), fires once per hold, re-arms only after release. While
+            // held, mask Steam+Y out of g_in.buttons so the press doesn't leak to the host -- in EVERY mode except
+            // regular Steam (mode 0 forwards the raw 0x45 to Steam, which owns the Steam button). Runs before
+            // onReport45 below so push modes (Xbox) see the mask too; stream modes read g_in in task() (also masked).
+            { static unsigned long offHoldMs=0; static bool offFired=false;
+              if((bb&(TB_STEAM|TB_Y))==(TB_STEAM|TB_Y)){
+                if(offHoldMs==0) offHoldMs=millis();
+                else if(!offFired && (unsigned long)(millis()-offHoldMs)>=2000u){ offFired=true; hapticSendShutdown(); }
+                if(g_usbMode!=MODE_STEAM){
+                  g_in.buttons &= ~(uint32_t)(TB_STEAM|TB_Y);          // stream modes read g_in
+                  ((uint8_t*)rep)[2] &= ~(uint8_t)TB_Y;               // push modes read btnsOf(rep): TB_Y in rep[2],
+                  ((uint8_t*)rep)[4] &= ~(uint8_t)(TB_STEAM>>16);     // TB_STEAM in rep[4]
+                }
+              } else { offHoldMs=0; offFired=false; }
+            }
             g_in.lx=(int16_t)s16off(rep,8);  g_in.ly=(int16_t)s16off(rep,10);
             g_in.rx=(int16_t)s16off(rep,12); g_in.ry=(int16_t)s16off(rep,14);
             g_in.lt=trigU8(u16off(rep,4));   g_in.rt=trigU8(u16off(rep,6));   // for the Switch digital-trigger threshold

@@ -17,19 +17,20 @@ int     g_mDiv = 64, g_mFric = 94;
 uint8_t g_abSwap = 0;
 uint8_t g_back[4] = {5,6,7,8};   // L4->LB R4->RB L5->L3 R5->R3 (0..11 buttons, 12..15 D-pad U/D/L/R)
 uint8_t g_qamMap = 0;            // 0 = default (unmapped, uses hardcoded behavior per mode)
+uint8_t g_rumbleScale = 200;     // rumble strength % (200 = double); adjustable from the WebUSB panel
 
 // poll rate is fixed. Faster than the controller can refresh wastes airtime; slower adds latency. Any rate
 // persisted by an older build is ignored and overwritten with the default on boot (see loadCfg).
 const uint32_t g_pollUs = POLL_US_DEFAULT;
 
 #define CFG_FILE "/cfg.bin"
-#define CFG_MAGIC 0xC8   // bumped (qamMap): old cfg ignored -> clean defaults on first boot
-struct Cfg { uint8_t magic, mode, mDiv, mFric, rsvd0, abSwap, back[4], pollU100, persistMode, bootMode, chordBtn[3], qamMap; };  // rsvd0 = ex-padSmooth, now the one-shot debug-CDC arm
+#define CFG_MAGIC 0xC9   // bumped (rumbleScale): old cfg ignored -> clean defaults on first boot
+struct Cfg { uint8_t magic, mode, mDiv, mFric, rsvd0, abSwap, back[4], pollU100, persistMode, bootMode, chordBtn[3], qamMap, rumbleScale; };  // rsvd0 = ex-padSmooth, now the one-shot debug-CDC arm
 
 void saveCfg(){
   Cfg c={CFG_MAGIC,g_usbMode,(uint8_t)g_mDiv,(uint8_t)g_mFric,g_debugCdc,g_abSwap,
          {g_back[0],g_back[1],g_back[2],g_back[3]},(uint8_t)(g_pollUs/100),(uint8_t)(g_persistMode?1:0),g_bootMode,
-         {g_chordBtn[0],g_chordBtn[1],g_chordBtn[2]},g_qamMap};
+         {g_chordBtn[0],g_chordBtn[1],g_chordBtn[2]},g_qamMap,g_rumbleScale};
   InternalFS.remove(CFG_FILE); File f(InternalFS);
   if(f.open(CFG_FILE,FILE_O_WRITE)){ f.write((uint8_t*)&c,sizeof c); f.close(); }
 }
@@ -54,6 +55,7 @@ void loadCfg(){
       static const uint8_t CHORD_DEF[3]={MODE_LIZARD,MODE_XBOX,MODE_SW_HORI};
       for(int i=0;i<3;i++) g_chordBtn[i]=modeValid(c.chordBtn[i])?c.chordBtn[i]:CHORD_DEF[i];
       g_qamMap = c.qamMap;
+      g_rumbleScale = c.rumbleScale;   // 0 is a valid setting (rumble off)
     }
     f.close();
   }

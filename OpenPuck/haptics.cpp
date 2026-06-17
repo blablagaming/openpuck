@@ -148,6 +148,10 @@ void haptic82HostReport(const uint8_t* p, uint16_t n){
   g_haptic82On = haptic82PayloadOn(p,n);
 }
 bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq){
+  if(g_rumbleScale!=100){            // user rumble-strength scale (percent; 200 = double). Clamp to 16-bit.
+    uint32_t l=(uint32_t)lowFreq*g_rumbleScale/100, h=(uint32_t)highFreq*g_rumbleScale/100;
+    lowFreq=(l>0xFFFF)?0xFFFF:(uint16_t)l; highFreq=(h>0xFFFF)?0xFFFF:(uint16_t)h;
+  }
   bool on = lowFreq || highFreq;
   if(on && haptic82Blocked()) return false;       // same settle gate as native Steam haptics
   if(!on && !hapticLinkUp()) return false;

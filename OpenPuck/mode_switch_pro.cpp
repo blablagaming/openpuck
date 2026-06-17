@@ -112,18 +112,17 @@ static void jcInputPrefix(uint8_t* out){
 static void switchProBuild(uint8_t out[63]){
   memset(out,0,63);
   jcInputPrefix(out);
+  // Gyro slot order follows hid-nintendo: raw+6 = ROLL, raw+8 = PITCH, raw+10 = YAW. Steam-validated source
+  // routing: roll<-gy, pitch<--gx (inverted), yaw<-gz.
+  int16_t gpitch=(int16_t)(-(int16_t)g_in.gx);
   for(int k=0;k<3;k++){
     int o=12+k*12;
-    // Accel and gyro must share one axis convention or the Switch's gyro+gravity fusion reads a pure pitch as
-    // diagonal motion. The Steam IMU has X/Y transposed vs the Pro Controller frame, so swap X<->Y on BOTH
-    // sensors (Z/yaw unchanged): accel X<-ay, accel Y<-ax to match the gyro swap below.
-    out[o+0]=g_in.ay&0xFF; out[o+1]=g_in.ay>>8;     // accel X <- g_in.ay
-    out[o+2]=g_in.ax&0xFF; out[o+3]=g_in.ax>>8;     // accel Y <- g_in.ax
-    out[o+4]=g_in.az&0xFF; out[o+5]=g_in.az>>8;     // accel Z
-    int16_t gpitch = (int16_t)(-(int16_t)g_in.gy);  // pitch sense is inverted vs the Switch frame -> negate
-    out[o+6]=gpitch&0xFF; out[o+7]=(gpitch>>8)&0xFF; // gyro X (pitch) <- -g_in.gy
-    out[o+8]=g_in.gx&0xFF; out[o+9]=g_in.gx>>8;     // gyro Y (roll)  <- g_in.gx
-    out[o+10]=g_in.gz&0xFF; out[o+11]=g_in.gz>>8;   // gyro Z (yaw)
+    out[o+0]=g_in.ay&0xFF;  out[o+1]=g_in.ay>>8;    // accel X <- g_in.ay
+    out[o+2]=g_in.ax&0xFF;  out[o+3]=g_in.ax>>8;    // accel Y <- g_in.ax
+    out[o+4]=g_in.az&0xFF;  out[o+5]=g_in.az>>8;    // accel Z
+    out[o+6]=g_in.gy&0xFF;  out[o+7]=g_in.gy>>8;       // gyro ROLL  <- g_in.gy
+    out[o+8]=gpitch&0xFF;   out[o+9]=(gpitch>>8)&0xFF;  // gyro PITCH <- -g_in.gx (inverted vs Switch frame)
+    out[o+10]=g_in.gz&0xFF; out[o+11]=g_in.gz>>8;      // gyro YAW   <- g_in.gz
   }
 }
 // --- Canonical factory SPI dumps the host reads for calibration. Neutral IMU + centered sticks so a fresh

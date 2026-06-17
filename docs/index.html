@@ -110,6 +110,12 @@
       <p class="note">Right-pad cursor in Steam-mode lizard (Steam closed) and in Xbox mode. Sensitivity is a divisor — lower = faster pointer. Glide = how long the cursor coasts after a flick.</p>
     </div>
 
+    <div class="card">
+      <h2>Rumble</h2>
+      <div class="row"><label>Strength</label><input type="range" id="rumble" min="0" max="255" step="5"><span class="val" id="rumbleV"></span></div>
+      <p class="note">Scales rumble amplitude across all modes (100% = native, 200% = double, 0% = off).</p>
+    </div>
+
 
     <div class="card">
       <h2>Button mapping</h2>
@@ -233,6 +239,7 @@ function applyBlob(p){
   $("#mouseCard").style.opacity = (mode===1||mode===3)?1:0.5;
   // status
   const battery=(p.length>36?p[36]:0);                    // controller battery % (report 0x43); 0 = unknown
+  const rumbleScale=(p.length>51?p[51]:200);              // rumble strength % (protocol v5+; older blob -> default)
   const rssi=(p.length>37?p[37]:0);                       // RAW signal strength |dBm| (0 = no sample)
   $("#stLink").innerHTML = up? '<span class="pill up">up</span>' : '<span class="pill dn">down</span>';
   $("#stBatt").textContent = (up && battery)? battery+"%" : "—";
@@ -252,14 +259,14 @@ function applyBlob(p){
     ? (gitHash + (gitDirty ? ' <span class="pill dn">dirty</span>' : ' <span class="pill up">clean</span>'))
     : "—";
   // sliders (only if not being dragged)
-  setSlider("mDiv",mDiv); setSlider("mFric",mFric);
+  setSlider("mDiv",mDiv); setSlider("mFric",mFric); setSlider("rumble",rumbleScale);
   $("#abSwap").textContent = abSwap? "on":"off"; $("#abSwap").classList.toggle("active",!!abSwap);
   $("#persistMode").textContent = persistMode? "on":"off"; $("#persistMode").classList.toggle("active",!!persistMode);
   for(const sel of document.querySelectorAll("select.back")){ if(document.activeElement!==sel) sel.value=back[+sel.dataset.i]; }
   { const sel=$("#qamMap"); if(document.activeElement!==sel) sel.value=qamMap; }
   for(const sel of document.querySelectorAll("select.chord")){ if(document.activeElement!==sel) sel.value=chord[+sel.dataset.i]; }
 }
-function fmtSlider(id,v){ return ""+v; }
+function fmtSlider(id,v){ return id==="rumble" ? v+"%" : ""+v; }
 function setSlider(id,v){ const el=$("#"+id); if(document.activeElement!==el){ el.value=v; } $("#"+id+"V").textContent=fmtSlider(id,el.value); }
 
 let inflight=false;
@@ -362,8 +369,8 @@ $("#factoryErase").onclick=async()=>{
 };
 $("#abSwap").onclick=()=>{ const on=$("#abSwap").classList.contains("active"); setField(4, on?0:1); };
 $("#persistMode").onclick=()=>{ const on=$("#persistMode").classList.contains("active"); setField(16, on?0:1); };
-for(const id of ["mDiv","mFric"]){
-  const field={mDiv:1,mFric:2}[id];
+for(const id of ["mDiv","mFric","rumble"]){
+  const field={mDiv:1,mFric:2,rumble:22}[id];
   $("#"+id).addEventListener("input", ()=>{ $("#"+id+"V").textContent=fmtSlider(id,$("#"+id).value); });
   $("#"+id).addEventListener("change", ()=>setField(field, +$("#"+id).value));
 }

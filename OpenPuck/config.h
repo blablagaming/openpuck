@@ -64,6 +64,7 @@ extern int     g_mDiv, g_mFric; // xbox/lizard mouse sensitivity divisor / frict
 extern uint8_t g_abSwap;        // 1 = swap A/B and X/Y (Nintendo face-button layout)
 extern uint8_t g_back[4];       // back paddles L4,R4,L5,R5 -> button codes (0..15 standard, 16=PS Touch Click, 17=PS5 Mute)
 extern uint8_t g_qamMap;        // QAM (3 dots) physical button -> same code space (0 = default/unmapped)
+extern uint8_t g_rumbleScale;   // rumble strength, percent of decoded amplitude (100 = 1x, 200 = 2x default), all modes
 
 #define POLL_US_DEFAULT 4000u   // 250 Hz -- matches SC2 input report rate (1000000/250 = 4000 us)
 #define USB_STREAM_MS   4u      // host-side HID stream cadence for translated modes (~250 Hz)

@@ -12,6 +12,10 @@ using namespace Adafruit_LittleFS_Namespace;
 
 SwitchProController g_switchPro;
 
+// Switch full-report (0x30) cadence. MUST be ~15 ms (66 Hz), the genuine 3-samples-per-15ms rate -- NOT the 4 ms
+// PC streaming rate -- or the console over-integrates the gyro (see task()). 2wiCC uses ~60 Hz; this matches.
+#define SW_PRO_REPORT_MS 15u
+
 static const uint8_t SWPRO_HID_DESC[]={
   0x05,0x01,0x15,0x00,0x09,0x04,0xA1,0x01,0x85,0x30,0x05,0x01,0x05,0x09,0x19,0x01,
   0x29,0x0A,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x0A,0x55,0x00,0x65,0x00,0x81,0x02,
@@ -317,7 +321,13 @@ void SwitchProController::task(){
     return;                                             // one report per call; the rest next loop
   }
   if(g_swProReportMode!=0x30) return;                   // not until the host has finished init + selected 0x30
-  if(millis()-g_swProLastMs<USB_STREAM_MS) return; g_swProLastMs=millis();
+  // Stream the standard full report at ~66 Hz (15 ms), NOT the 250 Hz USB_STREAM_MS the PC modes use. The Switch
+  // integrates the report's 3 IMU samples by SAMPLE COUNT at a fixed ~5 ms/sample (it ignores the timer byte and
+  // assumes a 3-samples-per-15ms genuine cadence). At 250 Hz x 3 samples = 750 samples/s it credits ~3.75 s of
+  // gyro rotation per real second, so any residual gyro bias accumulates ~3.75x too fast -> the slow orientation
+  // lean that builds over minutes and resets on replug. 15 ms matches the genuine push (and 2wiCC's ~60 Hz /
+  // MissionControl), making integration 1:1. (Buttons/sticks on the Switch are genuine-rate-limited anyway.)
+  if(millis()-g_swProLastMs<SW_PRO_REPORT_MS) return; g_swProLastMs=millis();
   uint8_t p[63]; switchProBuild(p);
   g_swPro.sendReport(0x30, p, sizeof p);
 }

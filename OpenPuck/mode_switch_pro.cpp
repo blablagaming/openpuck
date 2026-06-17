@@ -113,16 +113,24 @@ static void switchProBuild(uint8_t out[63]){
   memset(out,0,63);
   jcInputPrefix(out);
   // Gyro slot order follows hid-nintendo: raw+6 = ROLL, raw+8 = PITCH, raw+10 = YAW. Steam-validated source
-  // routing: roll<-gy, pitch<--gx (inverted), yaw<-gz.
+  // routing (a proper rotation, det +1): SwitchX<-+gy, SwitchY<--gx, SwitchZ<-+gz.
+  //
+  // CRITICAL: the accel MUST use the SAME signed permutation as the gyro. Steam reads the gyro raw and ignores
+  // this, but the Switch console FUSES accel (gravity) with gyro to anchor absolute orientation -- and if the
+  // accel frame has the opposite handedness, the fusion's gravity-correction term points the wrong way and the
+  // attitude estimate latches into a rotated solution (the intermittent ~45deg axis-mixing, per-unit roll bias,
+  // and "only a replug clears it" behaviour). So accel Y must be -ax to match the gyro's -gx pitch axis; with
+  // that, accel is also det +1 and resting gravity lands cleanly on Switch Z (the up axis).
   int16_t gpitch=(int16_t)(-(int16_t)g_in.gx);
+  int16_t aY=(int16_t)(-(int16_t)g_in.ax);
   for(int k=0;k<3;k++){
     int o=12+k*12;
-    out[o+0]=g_in.ay&0xFF;  out[o+1]=g_in.ay>>8;    // accel X <- g_in.ay
-    out[o+2]=g_in.ax&0xFF;  out[o+3]=g_in.ax>>8;    // accel Y <- g_in.ax
-    out[o+4]=g_in.az&0xFF;  out[o+5]=g_in.az>>8;    // accel Z
-    out[o+6]=g_in.gy&0xFF;  out[o+7]=g_in.gy>>8;       // gyro ROLL  <- g_in.gy
-    out[o+8]=gpitch&0xFF;   out[o+9]=(gpitch>>8)&0xFF;  // gyro PITCH <- -g_in.gx (inverted vs Switch frame)
-    out[o+10]=g_in.gz&0xFF; out[o+11]=g_in.gz>>8;      // gyro YAW   <- g_in.gz
+    out[o+0]=g_in.ay&0xFF;  out[o+1]=g_in.ay>>8;       // accel X (Switch) <- +g_in.ay   (matches gyro +gy)
+    out[o+2]=aY&0xFF;       out[o+3]=(aY>>8)&0xFF;      // accel Y (Switch) <- -g_in.ax   (matches gyro -gx)
+    out[o+4]=g_in.az&0xFF;  out[o+5]=g_in.az>>8;        // accel Z (Switch) <- +g_in.az   (matches gyro +gz)
+    out[o+6]=g_in.gy&0xFF;  out[o+7]=g_in.gy>>8;        // gyro ROLL  <- +g_in.gy
+    out[o+8]=gpitch&0xFF;   out[o+9]=(gpitch>>8)&0xFF;  // gyro PITCH <- -g_in.gx
+    out[o+10]=g_in.gz&0xFF; out[o+11]=g_in.gz>>8;       // gyro YAW   <- +g_in.gz
   }
 }
 // --- Canonical factory SPI dumps the host reads for calibration. Neutral IMU + centered sticks so a fresh

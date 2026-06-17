@@ -118,6 +118,16 @@
       <p class="note">Scales rumble amplitude across all modes (100% = native, 200% = double, 0% = off).</p>
     </div>
 
+    <div class="card">
+      <h2>Switch Pro motion</h2>
+      <div class="row"><label>Report rate</label>
+        <button id="swRate">66 Hz</button>
+        <span class="note" style="flex:1">66 Hz matches a real Pro Controller (no gyro drift). 120 Hz is lower-latency but may reintroduce slow gyro drift on some consoles.</span>
+      </div>
+      <div class="row"><label>Gyro scale</label><select id="swGyro"></select></div>
+      <p class="note">Gyro sensitivity multiplier for Switch Pro mode (1.0× = unchanged).</p>
+    </div>
+
 
     <div class="card">
       <h2>Button mapping</h2>
@@ -167,6 +177,11 @@ for(const sel of document.querySelectorAll("select.back")){
 }
 for(const sel of document.querySelectorAll("select.chord")){
   MODE_NAMES.forEach((n,i)=>{ const o=document.createElement("option"); o.value=i; o.textContent=n; sel.appendChild(o); });
+}
+// Switch Pro gyro-scale options (value = scale x10, so it fits in one byte)
+{ const sel=document.getElementById("swGyro");
+  for(const [lbl,v] of [["0.5×",5],["1.0×",10],["1.5×",15],["2.0×",20],["2.5×",25],["3.0×",30]]){
+    const o=document.createElement("option"); o.value=v; o.textContent=lbl; sel.appendChild(o); }
 }
 
 async function connect(){
@@ -242,6 +257,8 @@ function applyBlob(p){
   // status
   const battery=(p.length>36?p[36]:0);                    // controller battery % (report 0x43); 0 = unknown
   const rumbleScale=(p.length>51?p[51]:200);              // rumble strength % (protocol v5+; older blob -> default)
+  const swPro120=(p.length>52?p[52]:0);                   // Switch Pro 120Hz toggle (protocol v6+)
+  const swGyro10=(p.length>53?p[53]:10);                  // Switch Pro gyro scale x10 (protocol v6+)
   const rssi=(p.length>37?p[37]:0);                       // RAW signal strength |dBm| (0 = no sample)
   $("#stLink").innerHTML = up? '<span class="pill up">up</span>' : '<span class="pill dn">down</span>';
   $("#stBatt").textContent = (up && battery)? battery+"%" : "—";
@@ -266,6 +283,8 @@ function applyBlob(p){
   $("#persistMode").textContent = persistMode? "on":"off"; $("#persistMode").classList.toggle("active",!!persistMode);
   for(const sel of document.querySelectorAll("select.back")){ if(document.activeElement!==sel) sel.value=back[+sel.dataset.i]; }
   { const sel=$("#qamMap"); if(document.activeElement!==sel) sel.value=qamMap; }
+  $("#swRate").textContent = swPro120? "120 Hz":"66 Hz"; $("#swRate").classList.toggle("active",!!swPro120);
+  { const sel=$("#swGyro"); if(document.activeElement!==sel) sel.value=swGyro10; }
   for(const sel of document.querySelectorAll("select.chord")){ if(document.activeElement!==sel) sel.value=chord[+sel.dataset.i]; }
 }
 function fmtSlider(id,v){ return id==="rumble" ? v+"%" : ""+v; }
@@ -380,6 +399,8 @@ for(const sel of document.querySelectorAll("select.back")){
   sel.addEventListener("change", ()=>setField(5 + +sel.dataset.i, +sel.value));
 }
 $("#qamMap").addEventListener("change", ()=>setField(21, +$("#qamMap").value));
+$("#swRate").onclick=()=>{ const on=$("#swRate").classList.contains("active"); setField(23, on?0:1); };
+$("#swGyro").addEventListener("change", ()=>setField(24, +$("#swGyro").value));
 for(const sel of document.querySelectorAll("select.chord")){
   sel.addEventListener("change", ()=>setField(CHORD_FIELD[+sel.dataset.i], +sel.value));
 }

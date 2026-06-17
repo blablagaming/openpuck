@@ -12,9 +12,39 @@ using namespace Adafruit_LittleFS_Namespace;
 
 SwitchProController g_switchPro;
 
-// Switch full-report (0x30) cadence. MUST be ~15 ms (66 Hz), the genuine 3-samples-per-15ms rate -- NOT the 4 ms
+// Switch full-report (0x30) cadence. Default ~15 ms (66 Hz), the genuine 3-samples-per-15ms rate -- NOT the 4 ms
 // PC streaming rate -- or the console over-integrates the gyro (see task()). 2wiCC uses ~60 Hz; this matches.
-#define SW_PRO_REPORT_MS 15u
+// g_swPro120 switches to 8 ms (~120 Hz) for lower latency (may reintroduce gyro drift on some consoles).
+#define SW_PRO_REPORT_MS    15u
+#define SW_PRO_REPORT_MS_120 8u
+
+uint8_t g_swPro120 = 0;          // 0 = 66Hz (default), 1 = 120Hz
+uint8_t g_swGyroScale10 = 10;    // gyro sensitivity x10 (10 = 1.0x)
+
+// Persist the two Switch Pro motion settings in their own tiny file so they never trigger a global-Cfg reset.
+#define SWPRO_CFG_FILE "/swprocfg.bin"
+void swProSaveCfg(){
+  uint8_t b[3] = { 0x01, g_swPro120, g_swGyroScale10 };   // [ver][rate][gyroScale x10]
+  InternalFS.remove(SWPRO_CFG_FILE); File f(InternalFS);
+  if(f.open(SWPRO_CFG_FILE, FILE_O_WRITE)){ f.write(b,sizeof b); f.close(); }
+}
+static void swProLoadCfg(){
+  File f(InternalFS); uint8_t b[3];
+  if(f.open(SWPRO_CFG_FILE, FILE_O_READ)){
+    if(f.read(b,3)==3 && b[0]==0x01){
+      g_swPro120 = b[1]?1:0;
+      g_swGyroScale10 = (b[2]>=5 && b[2]<=30) ? b[2] : 10;   // sane bounds (0.5x..3.0x)
+    }
+    f.close();
+  }
+}
+// Scale a gyro axis by g_swGyroScale10/10, clamped to int16 (3x can saturate at high rates -- expected).
+static int16_t gscale(int16_t v){
+  if(g_swGyroScale10==10) return v;
+  int32_t s = (int32_t)v * (int32_t)g_swGyroScale10 / 10;
+  if(s>32767) s=32767; else if(s<-32768) s=-32768;
+  return (int16_t)s;
+}
 
 static const uint8_t SWPRO_HID_DESC[]={
   0x05,0x01,0x15,0x00,0x09,0x04,0xA1,0x01,0x85,0x30,0x05,0x01,0x05,0x09,0x19,0x01,
@@ -128,16 +158,18 @@ static void switchProBuild(uint8_t out[63]){
   // attitude estimate latches into a rotated solution (the intermittent ~45deg axis-mixing, per-unit roll bias,
   // and "only a replug clears it" behaviour). So accel Y must be -ax to match the gyro's -gx pitch axis; with
   // that, accel is also det +1 and resting gravity lands cleanly on Switch Z (the up axis).
-  int16_t gpitch=(int16_t)(-(int16_t)g_in.gx);
   int16_t aY=(int16_t)(-(int16_t)g_in.ax);
+  int16_t groll =gscale((int16_t)g_in.gy);            // gyro outputs scaled by the user sensitivity factor
+  int16_t gpitch=gscale((int16_t)(-(int16_t)g_in.gx));
+  int16_t gyaw  =gscale((int16_t)g_in.gz);
   for(int k=0;k<3;k++){
     int o=12+k*12;
     out[o+0]=g_in.ay&0xFF;  out[o+1]=g_in.ay>>8;       // accel X (Switch) <- +g_in.ay   (matches gyro +gy)
     out[o+2]=aY&0xFF;       out[o+3]=(aY>>8)&0xFF;      // accel Y (Switch) <- -g_in.ax   (matches gyro -gx)
     out[o+4]=g_in.az&0xFF;  out[o+5]=g_in.az>>8;        // accel Z (Switch) <- +g_in.az   (matches gyro +gz)
-    out[o+6]=g_in.gy&0xFF;  out[o+7]=g_in.gy>>8;        // gyro ROLL  <- +g_in.gy
-    out[o+8]=gpitch&0xFF;   out[o+9]=(gpitch>>8)&0xFF;  // gyro PITCH <- -g_in.gx
-    out[o+10]=g_in.gz&0xFF; out[o+11]=g_in.gz>>8;       // gyro YAW   <- +g_in.gz
+    out[o+6]=groll&0xFF;    out[o+7]=(groll>>8)&0xFF;   // gyro ROLL  <- +g_in.gy (scaled)
+    out[o+8]=gpitch&0xFF;   out[o+9]=(gpitch>>8)&0xFF;  // gyro PITCH <- -g_in.gx (scaled)
+    out[o+10]=gyaw&0xFF;    out[o+11]=(gyaw>>8)&0xFF;   // gyro YAW   <- +g_in.gz (scaled)
   }
 }
 // --- Canonical factory SPI dumps the host reads for calibration. Neutral IMU + centered sticks so a fresh
@@ -307,6 +339,7 @@ void SwitchProController::begin(){
   USBDevice.setProductDescriptor("Pro Controller");
   jcBuildStickCal();
   loadUserCal();   // restore any persisted Switch motion calibration (per-unit IMU bias correction)
+  swProLoadCfg();  // restore report-rate + gyro-scale settings
   g_swPro.enableOutEndpoint(true);
   g_swPro.setReportCallback(NULL, jcSet);   // answer the Nintendo USB handshake + subcommands (else Steam never binds it)
   g_swPro.setReportDescriptor(SWPRO_HID_DESC, sizeof SWPRO_HID_DESC);
@@ -327,7 +360,8 @@ void SwitchProController::task(){
   // gyro rotation per real second, so any residual gyro bias accumulates ~3.75x too fast -> the slow orientation
   // lean that builds over minutes and resets on replug. 15 ms matches the genuine push (and 2wiCC's ~60 Hz /
   // MissionControl), making integration 1:1. (Buttons/sticks on the Switch are genuine-rate-limited anyway.)
-  if(millis()-g_swProLastMs<SW_PRO_REPORT_MS) return; g_swProLastMs=millis();
+  uint32_t interval = g_swPro120 ? SW_PRO_REPORT_MS_120 : SW_PRO_REPORT_MS;
+  if(millis()-g_swProLastMs<interval) return; g_swProLastMs=millis();
   uint8_t p[63]; switchProBuild(p);
   g_swPro.sendReport(0x30, p, sizeof p);
 }

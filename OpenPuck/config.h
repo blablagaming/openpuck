@@ -72,6 +72,11 @@ extern uint8_t g_abSwap;        // 1 = swap A/B and X/Y (Nintendo face-button la
 extern uint8_t g_back[4];       // back paddles L4,R4,L5,R5 -> button codes (0..15 standard, 16=PS Touch Click, 17=PS5 Mute)
 extern uint8_t g_qamMap;        // QAM (3 dots) physical button -> same code space (0 = default/unmapped)
 extern uint8_t g_rumbleScale;   // rumble strength, percent of decoded amplitude (100 = 1x, 200 = 2x default), all modes
+// Switch Pro motion settings. Persisted in their OWN flash file (mode_switch_pro.cpp), NOT in Cfg -- so changing
+// them never resets the rest of the config. Set from the WebUSB panel.
+extern uint8_t g_swPro120;      // 0 = 66Hz (15ms) report cadence [genuine, default], 1 = 120Hz (8ms, lower latency)
+extern uint8_t g_swGyroScale10; // Switch Pro gyro sensitivity x10 (10 = 1.0x default; 5/15/20/25/30 = 0.5..3.0x)
+void swProSaveCfg();            // persist g_swPro120 + g_swGyroScale10 to their flash file
 
 #define POLL_US_DEFAULT 4000u   // 250 Hz -- matches SC2 input report rate (1000000/250 = 4000 us)
 #define USB_STREAM_MS   4u      // host-side HID stream cadence for translated modes (~250 Hz)

@@ -25,7 +25,7 @@ OpenPuck uses a [Pro Micro NRF52840](https://www.amazon.com/dp/B0GSZ7FD6T) ($8 o
 
 At any point you can hold all 4 back buttons and press X to switch over to ***Xbox mode** which maps all canonical inputs to their expected counterparts (plus L4 -> LB, L5 -> L3, etc which are configurable). In this mode the right trackpad acts as a mouse but at present this only works in Android and SteamOS.
 
-Similarly you can hold all 4 back buttons and press Y to switch (teehee) over to a **Switch mode**. This emulates a Pokken controller and is very limited (no gyro, no haptics, etc) but it's functional enough for my kids to play Animal Crossing :D. There's other modes as well:
+Similarly you can hold all 4 back buttons and press Y to switch (teehee) over to a **Switch mode**. This emulates a pro controller full with gyro and haptics. There's other modes as well:
 
 | Button combo (configurable) | Mode | Comment |
 |---|---|---|
@@ -53,10 +53,8 @@ A webusb based configuration UI is available [here](https://safijari.github.io/o
 # Future work
 - Find a way to make Xinput mode and mouse work together on all platforms
 - Ensure multiple controllers can function correctly (if I can ever buy one)
-- Tune haptics in Xinput mode
 - Design the charging portion (and make it short proof)
 - Design a 3D printable housing
-- Allow bluetooth controllers to pair with and connect to the puck
 
 # Contributions
 The firmware is split into small, single-responsibility modules under `OpenPuck/` (one file per emulated controller, plus the RF, config, and host-interface layers). Start with [ARCHITECTURE.md](./ARCHITECTURE.md) for the map of how it all fits together and how to add a new USB personality.

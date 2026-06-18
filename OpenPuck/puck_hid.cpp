@@ -6,6 +6,7 @@
 #include "rf_link.h"
 #include "triton.h"
 #include "mode_lizard.h"
+#include "wake_hid.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -447,20 +448,31 @@ static void wakeNudgeTask()
 	} // bus never resumed -> drop the nudge
 	if (USBDevice.suspended())
 		return; // wait for resume; reports can't cross a suspended bus
-	if (g_connSlot < 0 || g_connSlot >= NSLOT || !hid[g_connSlot].ready())
+	// gate on the interface we'll actually send on: boot mouse normally, slot HID only on the debug-CDC fallback
+	if (wakeHidPresent()) {
+		if (!wakeHidReady())
+			return;
+	} else if (g_connSlot < 0 || g_connSlot >= NSLOT ||
+		   !hid[g_connSlot].ready())
 		return;
 	static unsigned long stepMs = 0;
 	if (millis() - stepMs < 15)
 		return; // pace the edges
 	stepMs = millis();
-	hid_mouse_report_t m;
-	m.buttons = 0;
-	m.x = (g_nudgeStep == 1) ? NUDGE_JIGGLE_PX : -NUDGE_JIGGLE_PX;
-	m.y = 0;
-	m.wheel = 0;
-	m.pan = 0;
-	hid[g_connSlot].sendReport(0x40, &m,
-				   sizeof m); // jiggle right, then back
+	int8_t dx = (g_nudgeStep == 1) ? NUDGE_JIGGLE_PX : -NUDGE_JIGGLE_PX;
+	// Ride the boot mouse -- the interface the host armed as the wake source. Only fall back to the gamepad slot
+	// on the debug-CDC boot, where the wake mouse isn't registered (and the host can't wake from it anyway).
+	if (wakeHidPresent())
+		wakeHidMove(dx, 0); // jiggle right, then back
+	else {
+		hid_mouse_report_t m;
+		m.buttons = 0;
+		m.x = dx;
+		m.y = 0;
+		m.wheel = 0;
+		m.pan = 0;
+		hid[g_connSlot].sendReport(0x40, &m, sizeof m);
+	}
 	g_nudgeStep = (g_nudgeStep >= 2) ? 0 : (uint8_t)(g_nudgeStep + 1);
 }
 

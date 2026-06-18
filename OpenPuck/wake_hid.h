@@ -14,5 +14,17 @@
 // CDC and skips this interface (no endpoint room for both) -- see config.h (g_debugCdcThisBoot).
 #pragma once
 
-// register the boot-keyboard wake interface (call from setup() for clean modes)
+#include <stdint.h>
+
+// register the boot-mouse wake interface (call from setup() for clean modes + normal puck boot)
 void wakeHidBegin();
+
+// true once wakeHidBegin() has registered the boot mouse this boot (false on the debug-CDC boot, which omits it)
+bool wakeHidPresent();
+
+// boot mouse enumerated and ready to accept a report (false while the bus is suspended/unconfigured)
+bool wakeHidReady();
+
+// send one boot-mouse movement report (buttons=0). This is the input that actually wakes the host: it rides the
+// interface Windows armed as the wake source, unlike a gamepad-slot report. Returns false if not ready.
+bool wakeHidMove(int8_t dx, int8_t dy);

@@ -61,7 +61,8 @@ static uint16_t hidGyroGet(uint8_t rid, hid_report_type_t type, uint8_t *buf,
 	case 0xA3: // firmware / hardware info (49 incl id)
 		if (reqlen < 48)
 			return 0;
-		buf[0] = 0x01; // non-zero version (contents not validated over USB)
+		// non-zero version (contents not validated over USB)
+		buf[0] = 0x01;
 		return 48;
 	default:
 		return 0;

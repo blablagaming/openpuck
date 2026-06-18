@@ -16,4 +16,4 @@
 // (g_debugCdcThisBoot) and ARCHITECTURE.md.
 #pragma once
 
-void wakeHidBegin();   // register the boot-keyboard wake interface (call from setup() for clean modes)
+void wakeHidBegin(); // register the boot-keyboard wake interface (call from setup() for clean modes)

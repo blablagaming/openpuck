@@ -14,15 +14,17 @@
 #pragma once
 
 #ifndef WAKE_LED_PIN_A
-#define WAKE_LED_PIN_A LED_BUILTIN   // Feather: P1.15 user LED (harmless unconnected pad on SuperMini clones)
+#define WAKE_LED_PIN_A \
+	LED_BUILTIN // Feather: P1.15 user LED (harmless unconnected pad on SuperMini clones)
 #endif
 #ifndef WAKE_LED_PIN_B
-#define WAKE_LED_PIN_B 24            // SuperMini "Pro Micro" clone: P0.15 blue user LED (D24 in the Feather map)
+#define WAKE_LED_PIN_B \
+	24 // SuperMini "Pro Micro" clone: P0.15 blue user LED (D24 in the Feather map)
 #endif
 #ifndef WAKE_LED_ON
-#define WAKE_LED_ON HIGH             // set LOW if your board's LED is wired active-low
+#define WAKE_LED_ON HIGH // set LOW if your board's LED is wired active-low
 #endif
 
-void ledInit();        // call once from setup(): pins to output, LED off
-void ledWakePulse();   // call at each USBDevice.remoteWakeup() site: LED on now, off after 500ms
-void ledTask();        // call every loop(): times out the pulse
+void ledInit(); // call once from setup(): pins to output, LED off
+void ledWakePulse(); // call at each USBDevice.remoteWakeup() site: LED on now, off after 500ms
+void ledTask(); // call every loop(): times out the pulse

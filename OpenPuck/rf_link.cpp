@@ -334,4 +334,19 @@ void rfLinkTask(){
   }
   if (g_connOn && millis()-g_stMs>=1000){ g_f1ps=g_stF1; g_newps=g_stNew; g_pollsps=(uint16_t)g_stPoll;
     g_pollPeriodUs = g_pollDtCnt ? (uint16_t)(g_pollDtSum/g_pollDtCnt) : 0; g_pollDtSum=0; g_pollDtCnt=0; if(Serial.availableForWrite()>70) Serial.printf("# stat polls=%lu/s F1=%lu/s new=%lu/s F3=%lu/s(v%d) e7b=%u crcfail=%lu noRx=%lu slot=%d\n",(unsigned long)g_stPoll,(unsigned long)g_stF1,(unsigned long)g_stNew,(unsigned long)g_stF3,(int8_t)g_connF3v,g_e7b,(unsigned long)g_stCrc,(unsigned long)g_stNoRx,g_connSlot); g_stPoll=0; g_stF1=0; g_stNew=0; g_stF3=0; g_stCrc=0; g_stNoRx=0; g_chF1[0]=g_chF1[1]=g_chF1[2]=0; g_stMs=millis(); }
+  // Dead-link auto-recovery: the hardware WDT (~8s) resets a HUNG loop, but a wedged nRF52 RADIO peripheral
+  // with a still-running loop feeds the WDT every iteration -- RF is permanently dead while USB stays alive.
+  // If the link has been unresponsive for RFLINK_DEAD_RESET_MS after having been alive, reset to clear the
+  // radio hardware. After reset g_connReplyMs=0 so the watchdog stays disarmed until a fresh connection,
+  // preventing repeated resets when the controller is simply powered off.
+  { static unsigned long s_linkDeadSince = 0;
+    if (g_connReplyMs > 0 && millis()-g_connCooldown > 2500) {
+      if (millis()-g_connReplyMs < 300) { s_linkDeadSince = 0; }   // link alive -> reset timer
+      else if (!s_linkDeadSince) { s_linkDeadSince = millis(); }    // link just went dead -> start timer
+      else if ((uint32_t)(millis()-s_linkDeadSince) > RFLINK_DEAD_RESET_MS) {
+        if (Serial.availableForWrite()>60) Serial.printf("# dead-link watchdog: resetting after %lums down\n",(unsigned long)(millis()-s_linkDeadSince));
+        delay(10); NVIC_SystemReset();
+      }
+    } else { s_linkDeadSince = 0; }
+  }
 }

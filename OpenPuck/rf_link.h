@@ -62,3 +62,8 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t* payload, uint8_t plen, u
 void rfHopTo(uint8_t newCh);
 // Per-loop: host-frame beacons + connected-mode poll + remote-wakeup + QoS hop + per-second stats.
 void rfLinkTask();
+
+// Dead-link auto-recovery timeout (ms). If the RF link has been unresponsive for this long after having been
+// alive, rfLinkTask() calls NVIC_SystemReset() to clear any wedged radio hardware state. Set long enough that
+// the user can set down the controller without a spurious reset; short enough to recover without physical replug.
+#define RFLINK_DEAD_RESET_MS 120000u   // 2 minutes

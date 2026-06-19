@@ -46,16 +46,23 @@ uint16_t g_pollsps = 0;
 uint16_t g_pollPeriodUs = 0;
 static uint32_t g_pollDtSum = 0;
 static uint16_t g_pollDtCnt = 0;
-// smoothed |dBm| of the controller's replies (0 = none yet)
-volatile uint8_t g_linkRssi = 0;
-// battery % from the controller's report 0x43 (body[1]); 0 = none yet
-volatile uint8_t g_battery = 0;
+// smoothed |dBm| of the controller's replies, per slot (0 = none yet)
+volatile uint8_t g_linkRssi[NSLOT] = { 0 };
+// battery % from the controller's report 0x43 (body[1]); 0 = none yet. Per-slot -- the active controller's
+// battery is the most recently seen one (other slots' values stay in their own array slots).
+volatile uint8_t g_battery[NSLOT] = { 0 };
+
+// Slot the poll loop is currently driving. Set by rfConnStep before each E7/relay/E3, consumed by the
+// decode (g_in[g_curSlot]), the haptic flush (per-slot session address), and the per-second stat dump.
+int g_curSlot = -1;
 
 // ---- internal counters / timers ----
 static uint8_t g_e3pid = 0;
 static uint32_t g_stPoll = 0, g_stF1 = 0, g_stF3 = 0;
 static unsigned long g_stMs = 0;
-static uint8_t g_lastSeq = 0;
+// Per-slot dedupe seq + per-slot new-report counter (the real puck sends 0x45 per controller; merging all
+// slots into a single sequence makes one controller "swallow" the other's frame).
+static uint8_t g_lastSeq[NSLOT] = { 0 };
 static uint32_t g_stNew = 0;
 static uint32_t g_stCrc = 0, g_stNoRx = 0;
 static uint32_t g_chF1[3] = { 0, 0, 0 };
@@ -68,9 +75,20 @@ static unsigned long g_lastStream = 0;
 // proteus_uuid, b[10..14]=ibex_uuid). Built like PROTEUS FUN_00027e9a. Sent on the shared rendezvous addr;
 // the controller filters by the uuids in the payload, then connects.
 // Transmit one host frame. `discovery`=true sends it on the SHARED rendezvous address ("ibex"/ch2) where a
-// searching controller looks; =false sends it on this puck's unique SESSION address (the keepalive once the
-// controller has adopted the session). EITHER way the payload advertises the session base/prefix/channel, so
-// the controller always learns the unique address to connect on.
+// searching controller looks; =false sends it on this slot's unique SESSION address (the keepalive once the
+// controller has adopted the session). EITHER way the payload advertises the session base/prefix/channel,
+// so the controller always learns the unique address to connect on.
+
+// Any-slot link helper: true if ANY bonded slot is currently hearing F-type replies (within 300 ms).
+// Used for the "we're connected to at least one controller" decisions (beacon pacing, wake detect).
+bool anySlotLinkUp()
+{
+	for (int s = 0; s < NSLOT; s++)
+		if (g_slot[s].used && millis() - g_connReplyMs[s] < 300)
+			return true;
+	return false;
+}
+
 static void rfHostFrameOnce(int slot, bool discovery)
 {
 	if (slot < 0 || slot >= NSLOT || !g_slot[slot].used)
@@ -93,13 +111,14 @@ static void rfHostFrameOnce(int slot, bool discovery)
 	// payload[9] session channel: controller runs the session on this clean
 	// channel (adopts buf[0xe]); discovery beacon still TXes on ch2
 	rftx[11] = g_sessCh;
-	// payload[13..17] session base  (the per-device UNIQUE address)
-	memcpy(rftx + 15, g_sessBase, 4);
-	rftx[19] = g_sessPrefix; // payload[17] session prefix
-	// TX address: discovery uses the shared "ibex" rendezvous; the session keepalive uses our unique address
-	// (where the controller now listens). The advertised session params (above) are identical either way.
-	const uint8_t *txBase = discovery ? g_rfBase : g_sessBase;
-	uint8_t txPfx = discovery ? g_rfPrefix : g_sessPrefix;
+	// payload[13..17] session base  (the per-bond UNIQUE address; each controller adopts its own)
+	memcpy(rftx + 15, g_sessBase[slot], 4);
+	rftx[19] = g_sessPrefix[slot]; // payload[17] session prefix
+	// TX address: discovery uses the shared "ibex" rendezvous; the session keepalive uses this slot's
+	// unique address (where THIS controller now listens). The advertised session params (above) are
+	// identical either way -- so the discovery frame can also double as a re-advertisement if needed.
+	const uint8_t *txBase = discovery ? g_rfBase : g_sessBase[slot];
+	uint8_t txPfx = discovery ? g_rfPrefix : g_sessPrefix[slot];
 	rfConfig(g_rfCh);
 	rfSetAddr(txBase, txPfx);
 	NRF_RADIO->PACKETPTR = (uint32_t)rftx;
@@ -145,19 +164,27 @@ static void rfHostFrameOnce(int slot, bool discovery)
 
 void rfHopTo(uint8_t newCh)
 {
-	if (g_connSlot < 0 || newCh == g_sessCh)
+	// QoS hop is shared across all slots -- we run all connected sessions on the same channel for simplicity.
+	// The per-slot session ADDRESS is what isolates the controllers from each other; the channel is global.
+	if (g_curSlot < 0 || newCh == g_sessCh)
 		return;
 	uint8_t cur = g_sessCh, savedRfCh = g_rfCh;
 	g_sessCh = newCh;
-	// host frame now advertises newCh but is TXed on cur (session addr)
+	// host frame now advertises newCh but is TXed on cur (per-slot session addr)
 	g_rfCh = cur;
-	for (int k = 0; k < 6; k++) {
-		rfHostFrameOnce(g_connSlot, false);
-		delayMicroseconds(700);
-	}
+	for (int s = 0; s < NSLOT; s++)
+		for (int k = 0; k < 6; k++) {
+			rfHostFrameOnce(s, false);
+			delayMicroseconds(700);
+		}
 	g_rfCh = savedRfCh; // poll + session beacon now run on g_sessCh=newCh
 }
 
+// TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.
+// rxWinUs overrides the reply-wait window (0 = use g_rxWin). Pass a tiny value for NO-ACK relays that expect
+// no reply, so they don't burn a full ~1.2ms window of dead air per haptic. Per-slot: the connected poll runs
+// on this slot's UNIQUE session address (one address per bonded controller); replies are demuxed by which
+// address the controller answers on (each controller only hears its own).
 uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 		 uint16_t rxWinUs)
 {
@@ -168,8 +195,10 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 	rftx[1] = s1; // S1 (type-specific)
 	memcpy(rftx + 2, payload, plen); // payload[0]=type byte, then data/TLVs
 	rfConfig(ch);
-	// connected poll runs on this puck's UNIQUE session addr
-	rfSetAddr(g_sessBase, g_sessPrefix);
+	// connected poll runs on this slot's UNIQUE session addr (per-bond). g_curSlot is set by rfConnStep
+	// before each call; fall back to slot 0 if not (e.g. rf_diag paths).
+	int slot = (g_curSlot >= 0 && g_curSlot < NSLOT) ? g_curSlot : 0;
+	rfSetAddr(g_sessBase[slot], g_sessPrefix[slot]);
 	NRF_RADIO->PACKETPTR = (uint32_t)rftx;
 	NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk |
 			    RADIO_SHORTS_END_DISABLE_Msk;
@@ -210,24 +239,27 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 			// 0xE1 beacon (e.g. one just plugged into another computer), bumps g_connReplyMs, and the "new RF
 			// connection" wake in rfLinkTask() fires -> the second puck spuriously wakes this sleeping host.
 			if (rtype >= 0xF0) {
+				int s = (g_curSlot >= 0 && g_curSlot < NSLOT) ?
+						g_curSlot :
+						0;
 				// A reply after a long gap (or the first ever) = a (re)connect. Arm the haptic block + re-init HERE,
 				// directly off the reply stream -- reliable even when hapticTask's 300ms link-up edge doesn't fire
 				// (e.g. a power-cycled controller that reconnects without us cleanly seeing the link drop).
-				if (g_connReplyMs == 0 ||
-				    (uint32_t)(millis() - g_connReplyMs) >
+				if (g_connReplyMs[s] == 0 ||
+				    (uint32_t)(millis() - g_connReplyMs[s]) >
 					    1500u)
-					hapticOnReconnect();
+					hapticOnReconnect(s);
 				g_connRx++;
 				// link alive -> loop() suppresses the redundant E1 beacon
-				g_connReplyMs = millis();
+				g_connReplyMs[s] = millis();
 				// |dBm| of this reply (started by the ADDRESS short)
 				uint8_t rs =
 					(uint8_t)(NRF_RADIO->RSSISAMPLE & 0x7F);
-				// EWMA, ~8-sample horizon
+				// EWMA, ~8-sample horizon, per-slot
 				if (rs)
-					g_linkRssi =
-						g_linkRssi ?
-							(uint8_t)((g_linkRssi *
+					g_linkRssi[s] =
+						g_linkRssi[s] ?
+							(uint8_t)((g_linkRssi[s] *
 									   7u +
 								   rs + 4u) /
 								  8u) :
@@ -276,11 +308,11 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						const uint8_t *rep =
 							&rfrx[idx + 2];
 						bool fresh =
-							(rep[1] != g_lastSeq);
+							(rep[1] != g_lastSeq[g_curSlot]);
 						// genuine new report vs stale poll-repeat
 						if (fresh) {
 							g_stNew++;
-							g_lastSeq = rep[1];
+							g_lastSeq[g_curSlot] = rep[1];
 						}
 						uint32_t bb = btnsOf(rep);
 						// USB remote wakeup on Steam button short press (down + up within 1 s). A long press likely means
@@ -319,10 +351,10 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 							}
 						}
 						// Decode the report into the shared g_in (one source, read by every IController).
-						g_in.buttons = bb;
+						g_in[g_curSlot].buttons = bb;
 						// Global power-off chord: Steam + Y held 2 s -> shut the controller down (any mode). Detect on the raw
 						// `bb` (pre-mask), time-based (poll rate varies), fires once per hold, re-arms only after release. While
-						// held, mask Steam+Y out of g_in.buttons so the press doesn't leak to the host -- in EVERY mode except
+						// held, mask Steam+Y out of g_in[g_curSlot].buttons so the press doesn't leak to the host -- in EVERY mode except
 						// regular Steam (mode 0 forwards the raw 0x45 to Steam, which owns the Steam button). Runs before
 						// onReport45 below so push modes (Xbox) see the mask too; stream modes read g_in in task() (also masked).
 						{
@@ -349,7 +381,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 								if (g_usbMode !=
 								    MODE_STEAM) {
 									// stream modes read g_in
-									g_in.buttons &=
+									g_in[g_curSlot].buttons &=
 										~(uint32_t)(TB_STEAM |
 											    TB_Y);
 									// push modes read btnsOf(rep): TB_Y in rep[2],
@@ -371,26 +403,26 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 									false;
 							}
 						}
-						g_in.lx =
+						g_in[g_curSlot].lx =
 							(int16_t)s16off(rep, 8);
-						g_in.ly = (int16_t)s16off(rep,
+						g_in[g_curSlot].ly = (int16_t)s16off(rep,
 									  10);
-						g_in.rx = (int16_t)s16off(rep,
+						g_in[g_curSlot].rx = (int16_t)s16off(rep,
 									  12);
-						g_in.ry = (int16_t)s16off(rep,
+						g_in[g_curSlot].ry = (int16_t)s16off(rep,
 									  14);
-						g_in.lt =
+						g_in[g_curSlot].lt =
 							trigU8(u16off(rep, 4));
 						// for the Switch digital-trigger threshold
-						g_in.rt =
+						g_in[g_curSlot].rt =
 							trigU8(u16off(rep, 6));
-						g_in.lpx = (int16_t)s16off(rep,
+						g_in[g_curSlot].lpx = (int16_t)s16off(rep,
 									   16);
-						g_in.lpy = (int16_t)s16off(rep,
+						g_in[g_curSlot].lpy = (int16_t)s16off(rep,
 									   18);
-						g_in.rpx = (int16_t)s16off(rep,
+						g_in[g_curSlot].rpx = (int16_t)s16off(rep,
 									   22);
-						g_in.rpy = (int16_t)s16off(rep,
+						g_in[g_curSlot].rpy = (int16_t)s16off(rep,
 									   24);
 						// IMU lives at report bytes 0x22..0x2D (rep[34..45]). Decode it ONLY when a FULL 46-byte report was
 						// actually received -- bounded by `end` (the received length), NOT sizeof(rfrx). The outer gate is
@@ -400,13 +432,13 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						if (tlen >= 46 &&
 						    (size_t)(idx + 2) + 46 <=
 							    (size_t)end)
-							imuFrom45(rep, &g_in.ax,
-								  &g_in.ay,
-								  &g_in.az,
-								  &g_in.gx,
-								  &g_in.gy,
-								  &g_in.gz);
-						// Mode-switch chord (all 4 back + face): don't leak the face press to the host. g_in.buttons stays
+							imuFrom45(rep, &g_in[g_curSlot].ax,
+								  &g_in[g_curSlot].ay,
+								  &g_in[g_curSlot].az,
+								  &g_in[g_curSlot].gx,
+								  &g_in[g_curSlot].gy,
+								  &g_in[g_curSlot].gz);
+						// Mode-switch chord (all 4 back + face): don't leak the face press to the host. g_in[g_curSlot].buttons stays
 						// intact so the chord detector still fires; per-mode builders mask the same bits while back-4 held.
 						if ((bb & CHORD_BACK4) ==
 						    CHORD_BACK4)
@@ -419,7 +451,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						// g_in); PUSH modes (Xbox, puck/lizard) build + send their host report here.
 						if (g_active)
 							g_active->onReport45(
-								rep, fresh,
+								g_curSlot, rep, fresh,
 								tlen);
 						lastRep = rep;
 						lastTlen = tlen;
@@ -436,11 +468,12 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						const uint8_t *rep =
 							&rfrx[idx + 2];
 						// 0x43 body[1] (~0x5e=94) reads as battery % (sniff-derived)
-						if (rep[0] == 0x43 && tlen >= 3)
-							g_battery = rep[2];
+						if (rep[0] == 0x43 && tlen >= 3 && g_curSlot >= 0 &&
+						    g_curSlot < NSLOT)
+							g_battery[g_curSlot] = rep[2];
 						if (g_active)
 							g_active->onAuxReport(
-								rep[0], rep + 1,
+								g_curSlot, rep[0], rep + 1,
 								(uint8_t)(tlen -
 									  1));
 					}
@@ -450,15 +483,15 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 				{
 					static uint8_t chWant = 0xFF, chCnt = 0;
 					uint8_t want = 0xFF;
-					if ((g_in.buttons & CHORD_BACK4) ==
+					if ((g_in[g_curSlot].buttons & CHORD_BACK4) ==
 					    CHORD_BACK4) {
-						if (g_in.buttons & TB_A)
+						if (g_in[g_curSlot].buttons & TB_A)
 							want = MODE_STEAM;
-						else if (g_in.buttons & TB_B)
+						else if (g_in[g_curSlot].buttons & TB_B)
 							want = g_chordBtn[0];
-						else if (g_in.buttons & TB_X)
+						else if (g_in[g_curSlot].buttons & TB_X)
 							want = g_chordBtn[1];
-						else if (g_in.buttons & TB_Y)
+						else if (g_in[g_curSlot].buttons & TB_Y)
 							want = g_chordBtn[2];
 					}
 					if (want != 0xFF && want == chWant) {
@@ -515,19 +548,35 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 	return rxlen;
 }
 
-// Drive the connected-mode sequence one step per call. Camps on g_sessCh (the host-frame channel the
-// controller connected on); the host-frame beacon runs in parallel as keepalive.
+// Drive the connected-mode sequence one step per call. Round-robins the used slots, doing ONE slot's worth
+// of E7/relay/E3 per cycle. Per-slot poll rate = g_pollUs * usedSlotCount; with 1 controller 4ms/250Hz, with
+// 4 16ms/62.5Hz (matches the real puck's reported 4-controller pacing). g_curSlot is set before every TX
+// and consumed by the decode (g_in[g_curSlot]) and the haptic flush.
 static void rfConnStep()
 {
-	g_connSlot = -1;
+	// count + find the next used slot, starting AFTER the previous cycle's slot (round-robin).
+	int n = 0;
 	for (int s = 0; s < NSLOT; s++)
+		if (g_slot[s].used)
+			n++;
+	if (n == 0) {
+		g_curSlot = -1;
+		return;
+	}
+	int start = (g_curSlot < 0) ? 0 : ((g_curSlot + 1) % NSLOT);
+	int slot = -1;
+	for (int k = 0; k < NSLOT; k++) {
+		int s = (start + k) % NSLOT;
 		if (g_slot[s].used) {
-			g_connSlot = s;
+			slot = s;
 			break;
 		}
-	// need a bonded slot (session established by host frame)
-	if (g_connSlot < 0)
+	}
+	if (slot < 0) {
+		g_curSlot = -1;
 		return;
+	}
+	g_curSlot = slot;
 	uint8_t ch = g_sessCh;
 	// announce HOST AWAKE: E7 00 00, a few times
 	if (g_connSt == 0) {
@@ -601,8 +650,7 @@ void rfLinkTask()
 	// drops the reply rate from ~210/s to ~38/s. Paused only during the post-disconnect cooldown so a controller
 	// that's powering off isn't immediately re-woken/reconnected.
 	if (g_rfHost && millis() - g_connCooldown > 2500) {
-		bool connNow =
-			(g_connSlot >= 0 && millis() - g_connReplyMs < 300);
+		bool connNow = anySlotLinkUp();
 		// session keepalive on the clean channel: every loop while connecting (fast), every 25ms once connected
 		// (every-loop beaconing also hammers the session ch and steals reply slots from the poll)
 		if (millis() - g_lastSessBeacon >= (connNow ? 25u : 0u)) {
@@ -623,10 +671,9 @@ void rfLinkTask()
 		rfConnStep();
 	} // connected-mode: poll controller, read input
 	{
-		// remote wakeup on new RF controller connection
+		// remote wakeup on new RF controller connection (any slot)
 		static bool wasRfConn = false;
-		bool nowRfConn =
-			(g_connSlot >= 0 && millis() - g_connReplyMs < 300);
+		bool nowRfConn = anySlotLinkUp();
 		if (nowRfConn && !wasRfConn && USBDevice.suspended()) {
 			USBDevice.remoteWakeup();
 			ledWakePulse();
@@ -637,7 +684,7 @@ void rfLinkTask()
 		wasRfConn = nowRfConn;
 	}
 	// QoS: if the current channel is degrading (crcfail+noRx), hop to the next clean candidate (conservative).
-	if (g_qos && g_connSlot >= 0 && millis() - g_qosCheckMs >= 600) {
+	if (g_qos && g_curSlot >= 0 && millis() - g_qosCheckMs >= 600) {
 		uint16_t bad = g_qosBad;
 		g_qosBad = 0;
 		g_qosCheckMs = millis();
@@ -670,7 +717,7 @@ void rfLinkTask()
 				(unsigned long)g_stNew, (unsigned long)g_stF3,
 				(int8_t)g_connF3v, g_e7b,
 				(unsigned long)g_stCrc, (unsigned long)g_stNoRx,
-				g_connSlot);
+				g_curSlot);
 		g_stPoll = 0;
 		g_stF1 = 0;
 		g_stNew = 0;

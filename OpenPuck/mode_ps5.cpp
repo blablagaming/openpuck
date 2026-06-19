@@ -115,16 +115,16 @@ static void ps5Set(uint8_t rid, hid_report_type_t type, uint8_t const *b,
 
 static void ps5Build(uint8_t out[63])
 {
-	uint32_t b = psButtonsFromSteam(g_in.buttons);
+	uint32_t b = psButtonsFromSteam(g_in[0].buttons);
 	bool lTouch = (b & TB_LPADT) || (b & TB_LPADC),
 	     rTouch = (b & TB_RPADT) || (b & TB_RPADC);
 	memset(out, 0, 63);
-	out[0] = swStick(g_in.lx, false);
-	out[1] = swStick(g_in.ly, true);
-	out[2] = swStick(g_in.rx, false);
-	out[3] = swStick(g_in.ry, true);
-	out[4] = g_in.lt;
-	out[5] = g_in.rt;
+	out[0] = swStick(g_in[0].lx, false);
+	out[1] = swStick(g_in[0].ly, true);
+	out[2] = swStick(g_in[0].rx, false);
+	out[3] = swStick(g_in[0].ry, true);
+	out[4] = g_in[0].lt;
+	out[5] = g_in[0].rt;
 	static uint8_t seq = 0;
 	out[6] = seq++;
 	out[7] = psHatNibble(b) | psFaceNibble(b);
@@ -132,20 +132,20 @@ static void ps5Build(uint8_t out[63])
 	out[9] = ((b & TB_STEAM) ? 0x01 : 0) |
 		 ((b & TB_TOUCH || b & TB_LPADC || b & TB_RPADC) ? 0x02 : 0) |
 		 ((b & TB_MUTE) ? 0x04 : 0);
-	out[15] = g_in.gx & 0xFF;
-	out[16] = g_in.gx >> 8;
-	out[17] = g_in.gz & 0xFF;
-	out[18] = g_in.gz >> 8;
-	out[19] = (-g_in.gy) & 0xFF;
-	out[20] = (-g_in.gy) >> 8;
-	out[21] = g_in.ax & 0xFF;
-	out[22] = g_in.ax >> 8;
-	out[23] = g_in.ay & 0xFF;
-	out[24] = g_in.ay >> 8;
-	out[25] = g_in.az & 0xFF;
-	out[26] = g_in.az >> 8;
+	out[15] = g_in[0].gx & 0xFF;
+	out[16] = g_in[0].gx >> 8;
+	out[17] = g_in[0].gz & 0xFF;
+	out[18] = g_in[0].gz >> 8;
+	out[19] = (-g_in[0].gy) & 0xFF;
+	out[20] = (-g_in[0].gy) >> 8;
+	out[21] = g_in[0].ax & 0xFF;
+	out[22] = g_in[0].ax >> 8;
+	out[23] = g_in[0].ay & 0xFF;
+	out[24] = g_in[0].ay >> 8;
+	out[25] = g_in[0].az & 0xFF;
+	out[26] = g_in[0].az >> 8;
 	uint16_t lx, ly, rx, ry;
-	steamPadsToTouch(b, PS5_TOUCH_H, g_in.lpx, g_in.lpy, g_in.rpx, g_in.rpy,
+	steamPadsToTouch(b, PS5_TOUCH_H, g_in[0].lpx, g_in[0].lpy, g_in[0].rpx, g_in[0].rpy,
 			 &lx, &ly, &rx, &ry);
 	touchPackPads(out + 32, lTouch, rTouch, lx, ly, rx, ry);
 	out[52] = PS5_STATUS_USB;

@@ -23,7 +23,12 @@ static void webusbSendBlob()
 {
 	if (!usb_web.connected())
 		return;
-	bool up = (g_connSlot >= 0 && (millis() - g_connReplyMs) < 300);
+	// "connected" = the most recent poll cycle's slot had a fresh F-reply (matches what the firmware
+	// presents to Steam on 0x79). The blob is sent on the panel's poll, so the slot + up flag change
+	// every ~250ms in normal use.
+	int cs = (g_curSlot >= 0 && g_curSlot < NSLOT) ? g_curSlot : 0;
+	bool up = (g_curSlot >= 0 &&
+		   (millis() - g_connReplyMs[cs]) < 300);
 	uint8_t p[2 + WB_PAYLEN];
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
@@ -39,7 +44,7 @@ static void webusbSendBlob()
 	p[9] = g_back[1];
 	p[10] = g_back[2];
 	p[11] = g_back[3];
-	p[12] = (g_connSlot >= 0) ? (uint8_t)g_connSlot : 0xFF;
+	p[12] = (g_curSlot >= 0) ? (uint8_t)g_curSlot : 0xFF;
 	p[13] = up ? 1 : 0;
 	p[14] = (uint8_t)g_f1ps;
 	p[15] = (uint8_t)(g_f1ps >> 8);
@@ -68,8 +73,12 @@ static void webusbSendBlob()
 	p[36] = (uint8_t)(g_pollPeriodUs >>
 			  8); // measured poll period (intended 4000)
 	p[37] = OPK_LOG; // logging build? panel shows/hides its log UI
-	p[38] = g_battery; // controller battery % (report 0x43); 0=unknown
-	p[39] = g_linkRssi; // RAW signal strength |dBm| (0=no sample)
+	p[38] = g_battery[g_curSlot >= 0 && g_curSlot < NSLOT ?
+				  g_curSlot :
+				  0]; // controller battery % (report 0x43); 0=unknown
+	p[39] = g_linkRssi[g_curSlot >= 0 && g_curSlot < NSLOT ?
+				   g_curSlot :
+				   0]; // RAW signal strength |dBm| (0=no sample)
 	// git commit this firmware was built from + dirty flag; injected at build time
 	// (build_info.h / gen_version.sh); "unknown" if the version header wasn't generated.
 	p[40] = OPK_GIT_DIRTY ? 1 : 0;
@@ -87,7 +96,7 @@ static void webusbSendBlob()
 	// Switch Pro gyro sensitivity x10 (protocol v6)
 	p[55] = g_swGyroScale10;
 	{
-		int16_t a[3] = { g_in.ax, g_in.ay, g_in.az };
+		int16_t a[3] = { g_in[0].ax, g_in[0].ay, g_in[0].az };
 		memcpy(&p[56], a, 6);
 	} // raw accelerometer for scale diagnostics (protocol v7)
 	usb_web.write(p, sizeof p);

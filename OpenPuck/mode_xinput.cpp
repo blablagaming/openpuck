@@ -373,9 +373,10 @@ void XboxController::begin()
 	g_mouse.setPollInterval(1);
 	g_mouse.begin();
 }
-void XboxController::onReport45(const uint8_t *rep, bool fresh,
+void XboxController::onReport45(int slot, const uint8_t *rep, bool fresh,
 				uint8_t bodyTlen)
 {
+	(void)slot; // xinput mode is single-controller by design
 	(void)fresh;
 	(void)bodyTlen;
 	rfXboxGamepad(rep);

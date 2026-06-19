@@ -190,7 +190,7 @@ static void jcPackStick(uint8_t s[3], int16_t x, int16_t y)
 static uint8_t g_jcTimer = 0;
 static void jcInputPrefix(uint8_t *out)
 {
-	uint32_t b = g_in.buttons;
+	uint32_t b = g_in[0].buttons;
 	if (g_qamMap && (b & TB_QAM)) {
 		b &= ~(uint32_t)TB_QAM;
 		b |= tritonFromCode(g_qamMap);
@@ -214,9 +214,9 @@ static void jcInputPrefix(uint8_t *out)
 		jc |= JC_BTN_L;
 	if (b & TB_RB)
 		jc |= JC_BTN_R;
-	if ((g_in.lt >= SW_TRIG_ON) || (b & 0x8000000u))
+	if ((g_in[0].lt >= SW_TRIG_ON) || (b & 0x8000000u))
 		jc |= JC_BTN_ZL;
-	if ((g_in.rt >= SW_TRIG_ON) || (b & 0x800000u))
+	if ((g_in[0].rt >= SW_TRIG_ON) || (b & 0x800000u))
 		jc |= JC_BTN_ZR;
 	if (b & TB_VIEW)
 		jc |= JC_BTN_PLUS;
@@ -256,8 +256,8 @@ static void jcInputPrefix(uint8_t *out)
 	// charging_grip bit (button "common" byte, bit7): genuine Pro Controller always sets it on USB; real
 	// Switch uses it to recognise a wired controller. Not a button, so hid-nintendo ignores it.
 	out[3] |= 0x80;
-	jcPackStick(out + 5, g_in.lx, g_in.ly);
-	jcPackStick(out + 8, g_in.rx, g_in.ry);
+	jcPackStick(out + 5, g_in[0].lx, g_in[0].ly);
+	jcPackStick(out + 8, g_in[0].rx, g_in[0].ry);
 	// rumble_input_report echo: genuine pad emits 0x09..0x0C; some Switch firmware expects this nonzero.
 	out[11] = 0x09;
 }
@@ -278,14 +278,14 @@ static void switchProBuild(uint8_t out[63])
 	// ~1g. Without this the console reads gravity as ~4g, REJECTS the accel for drift correction (it must be linear
 	// accel, not gravity), and gyro roll error accumulates into a slow ~45deg lean. Gyro is left at native scale.
 	// accel X <- +ay, accel Y <- -ax, accel Z <- +az (signs match gyro)
-	int16_t aX = (int16_t)(g_in.ay / SW_ACCEL_DIV);
-	int16_t aY = (int16_t)((-(int16_t)g_in.ax) / SW_ACCEL_DIV);
-	int16_t aZ = (int16_t)(g_in.az / SW_ACCEL_DIV);
+	int16_t aX = (int16_t)(g_in[0].ay / SW_ACCEL_DIV);
+	int16_t aY = (int16_t)((-(int16_t)g_in[0].ax) / SW_ACCEL_DIV);
+	int16_t aZ = (int16_t)(g_in[0].az / SW_ACCEL_DIV);
 
 	// gyro outputs scaled by the user sensitivity factor
-	int16_t groll = gscale((int16_t)g_in.gy);
-	int16_t gpitch = gscale((int16_t)(-(int16_t)g_in.gx));
-	int16_t gyaw = gscale((int16_t)g_in.gz);
+	int16_t groll = gscale((int16_t)g_in[0].gy);
+	int16_t gpitch = gscale((int16_t)(-(int16_t)g_in[0].gx));
+	int16_t gyaw = gscale((int16_t)g_in[0].gz);
 	for (int k = 0; k < 3; k++) {
 		int o = 12 + k * 12;
 		out[o + 0] = aX & 0xFF;

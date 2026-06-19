@@ -47,8 +47,11 @@ void setup()
 	genSerial();
 	ledInit();
 
-	// per-device unique RF session address (advertised in the host frame; isolates pucks)
-	rfGenSessionAddr();
+	// per-device default RF session address (per-slot). The real generation is below, AFTER loadBonds, so
+	// the address can be derived from the bond UUID for each slot. The pre-load call here is just to
+	// populate the defaults so a slot with no bond doesn't accidentally share the discovery address.
+	for (int s = 0; s < NSLOT; s++)
+		rfGenSessionAddr(s);
 	InternalFS.begin();
 #if OPK_FACTORY_RESET
 	// Recovery build (-DOPK_FACTORY_RESET=1): wipe ALL persistent storage ONCE on the first boot after flashing,
@@ -56,6 +59,13 @@ void setup()
 	factoryResetOnce(OPK_GIT_HASH);
 #endif
 	loadCfg();
+	loadBonds();
+	// Now that bonds are loaded, regenerate per-slot session addresses from each bond's UUID. This is
+	// deterministic (a slot's address is stable across reboots) and avoids persisting the address in
+	// bonds.bin -- no schema bump needed.
+	for (int s = 0; s < NSLOT; s++)
+		if (g_slot[s].used)
+			rfGenSessionAddr(s);
 
 	// decide USB presentation BEFORE registering interfaces
 	g_xbox = !modeIsPuck(g_usbMode);
@@ -133,7 +143,8 @@ void setup()
 		USBDevice.remoteWakeup();
 		ledWakePulse();
 	} // wake host if bus was sleeping when we (re-)attached
-	loadBonds();
+	// loadBonds() was called earlier (after the bond-UUID-derived session addresses were generated);
+	// this is a no-op now but kept for forward-compat (a future migration to lazy-loading).
 	hapticInit();
 	static const char *MODE_NAME[] = {
 		"STEAM(puck)",	       "XBOX(xinput+mouse)",
@@ -152,9 +163,20 @@ void setup()
 				"DEBUG boot (CDC console on, wake mouse off; reverts next boot)" :
 				"normal (CDC off, wake mouse on)");
 	Serial.printf(
-		"# session addr %02X%02X%02X%02X/%02X ch%u (discovery on ibex/ch2)\n",
-		g_sessBase[0], g_sessBase[1], g_sessBase[2], g_sessBase[3],
-		g_sessPrefix, g_sessCh);
+		"# session ch%u (discovery on ibex/ch2); per-slot session addrs:\n",
+		g_sessCh);
+	for (int s = 0; s < NSLOT; s++) {
+		if (g_slot[s].used) {
+			Serial.printf(
+				"#   slot %d: %02X%02X%02X%02X/%02X (uuid %02X%02X%02X%02X %02X%02X%02X%02X)\n",
+				s, g_sessBase[s][0], g_sessBase[s][1],
+				g_sessBase[s][2], g_sessBase[s][3],
+				g_sessPrefix[s], g_slot[s].rec[0], g_slot[s].rec[1],
+				g_slot[s].rec[2], g_slot[s].rec[3],
+				g_slot[s].rec[4], g_slot[s].rec[5],
+				g_slot[s].rec[6], g_slot[s].rec[7]);
+		}
+	}
 	// Hardware watchdog: if loop() ever stops feeding it (wedged radio busy-wait, HardFault spin, blocked CDC
 	// write) the WDT resets the nRF52 after ~8s, re-enumerating USB + re-initialising RF, so a hang no longer
 	// needs a physical replug. RUN keeps it counting in sleep; PAUSE freezes it under a debugger.

@@ -95,39 +95,39 @@ static void hidGyroSet(uint8_t rid, hid_report_type_t type, uint8_t const *b,
 
 static void hidGyroBuild(uint8_t out[63])
 {
-	uint32_t b = psButtonsFromSteam(g_in.buttons);
+	uint32_t b = psButtonsFromSteam(g_in[0].buttons);
 	bool lTouch = (b & TB_LPADT) || (b & TB_LPADC),
 	     rTouch = (b & TB_RPADT) || (b & TB_RPADC);
 	memset(out, 0, 63);
-	out[0] = swStick(g_in.lx, false);
-	out[1] = swStick(g_in.ly, true);
-	out[2] = swStick(g_in.rx, false);
-	out[3] = swStick(g_in.ry, true);
+	out[0] = swStick(g_in[0].lx, false);
+	out[1] = swStick(g_in[0].ly, true);
+	out[2] = swStick(g_in[0].rx, false);
+	out[3] = swStick(g_in[0].ry, true);
 	out[4] = psHatNibble(b) | psFaceNibble(b);
 	out[5] = psShouldersByte(b);
 	static uint8_t ctr = 0;
 	out[6] = ((ctr++ & 0x0F) << 4) |
 		 ((b & TB_TOUCH || b & TB_LPADC || b & TB_RPADC) ? 0x02 : 0) |
 		 ((b & TB_STEAM) ? 0x01 : 0);
-	out[7] = g_in.lt;
-	out[8] = g_in.rt;
-	out[12] = g_in.gx & 0xFF;
-	out[13] = g_in.gx >> 8;
-	out[14] = g_in.gz & 0xFF;
-	out[15] = g_in.gz >> 8;
-	out[16] = (-g_in.gy) & 0xFF;
-	out[17] = (-g_in.gy) >> 8;
-	out[18] = g_in.ax & 0xFF;
-	out[19] = g_in.ax >> 8;
-	out[20] = g_in.ay & 0xFF;
-	out[21] = g_in.ay >> 8;
-	out[22] = g_in.az & 0xFF;
-	out[23] = g_in.az >> 8;
+	out[7] = g_in[0].lt;
+	out[8] = g_in[0].rt;
+	out[12] = g_in[0].gx & 0xFF;
+	out[13] = g_in[0].gx >> 8;
+	out[14] = g_in[0].gz & 0xFF;
+	out[15] = g_in[0].gz >> 8;
+	out[16] = (-g_in[0].gy) & 0xFF;
+	out[17] = (-g_in[0].gy) >> 8;
+	out[18] = g_in[0].ax & 0xFF;
+	out[19] = g_in[0].ax >> 8;
+	out[20] = g_in[0].ay & 0xFF;
+	out[21] = g_in[0].ay >> 8;
+	out[22] = g_in[0].az & 0xFF;
+	out[23] = g_in[0].az >> 8;
 	out[29] = DS4_STATUS_USB;
 	if (lTouch || rTouch) {
 		uint16_t lx, ly, rx, ry;
-		steamPadsToTouch(b, DS4_TOUCH_H, g_in.lpx, g_in.lpy, g_in.rpx,
-				 g_in.rpy, &lx, &ly, &rx, &ry);
+		steamPadsToTouch(b, DS4_TOUCH_H, g_in[0].lpx, g_in[0].lpy, g_in[0].rpx,
+				 g_in[0].rpy, &lx, &ly, &rx, &ry);
 		static uint8_t tstamp = 0;
 		out[32] = 1;
 		out[33] = tstamp++;

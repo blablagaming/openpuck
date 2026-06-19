@@ -76,7 +76,7 @@ static inline void backCodeToHatDirs(uint8_t c, bool &u, bool &d, bool &l,
 // HORIPAD/Switch button bits: Y=1 B=2 A=4 X=8 L=10 R=20 ZL=40 ZR=80 Minus=100 Plus=200 LClick=400 RClick=800 Home=1000 Capture=2000
 static void switchBuildHoripad(uint8_t out[8])
 {
-	uint32_t b = g_in.buttons;
+	uint32_t b = g_in[0].buttons;
 	uint16_t btn = 0;
 	if (g_qamMap && (b & TB_QAM)) {
 		b &= ~(uint32_t)TB_QAM;
@@ -101,9 +101,9 @@ static void switchBuildHoripad(uint8_t out[8])
 	if (b & TB_RB)
 		btn |= 0x20; // L, R
 	// ZL/ZR digital: trip on the analog threshold (activates early) OR the full-press click bit
-	if ((g_in.lt >= SW_TRIG_ON) || (b & 0x8000000u))
+	if ((g_in[0].lt >= SW_TRIG_ON) || (b & 0x8000000u))
 		btn |= 0x40;
-	if ((g_in.rt >= SW_TRIG_ON) || (b & 0x800000u))
+	if ((g_in[0].rt >= SW_TRIG_ON) || (b & 0x800000u))
 		btn |= 0x80;
 	if (b & TB_MENU)
 		btn |= 0x100;
@@ -154,10 +154,10 @@ static void switchBuildHoripad(uint8_t out[8])
 	out[0] = btn & 0xFF;
 	out[1] = btn >> 8;
 	out[2] = hat;
-	out[3] = swStick(g_in.lx, false);
-	out[4] = swStick(g_in.ly, true); // HID Y is down-positive -> invert
-	out[5] = swStick(g_in.rx, false);
-	out[6] = swStick(g_in.ry, true);
+	out[3] = swStick(g_in[0].lx, false);
+	out[4] = swStick(g_in[0].ly, true); // HID Y is down-positive -> invert
+	out[5] = swStick(g_in[0].rx, false);
+	out[6] = swStick(g_in[0].ry, true);
 	out[7] = 0;
 }
 

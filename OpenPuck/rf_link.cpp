@@ -358,23 +358,29 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						// regular Steam (mode 0 forwards the raw 0x45 to Steam, which owns the Steam button). Runs before
 						// onReport45 below so push modes (Xbox) see the mask too; stream modes read g_in in task() (also masked).
 						{
+							// Per-slot: each controller's Steam+Y hold is independent, so the debounce timer must
+							// be per-slot. With multiple controllers, a shared timer gets reset every time ANOTHER
+							// slot's poll (without the hold) runs -- and the round-robin poll cycles through every
+							// used slot, so the timer never reaches 2s.
 							static unsigned long
-								offHoldMs = 0;
-							static bool offFired =
-								false;
+								offHoldMs[NSLOT] = {
+									0, 0, 0, 0};
+							static bool offFired[NSLOT] = {
+								false, false, false,
+								false};
 							if ((bb & (TB_STEAM |
 								   TB_Y)) ==
 							    (TB_STEAM | TB_Y)) {
-								if (offHoldMs ==
+								if (offHoldMs[g_curSlot] ==
 								    0)
-									offHoldMs =
+									offHoldMs[g_curSlot] =
 										millis();
 								else if (
-									!offFired &&
+									!offFired[g_curSlot] &&
 									(unsigned long)(millis() -
-											offHoldMs) >=
+											offHoldMs[g_curSlot]) >=
 										2000u) {
-									offFired =
+									offFired[g_curSlot] =
 										true;
 									hapticSendShutdown();
 								}
@@ -398,8 +404,8 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 											   16);
 								}
 							} else {
-								offHoldMs = 0;
-								offFired =
+								offHoldMs[g_curSlot] = 0;
+								offFired[g_curSlot] =
 									false;
 							}
 						}
@@ -481,7 +487,15 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 				}
 				// mode-switch chord (back4 + face): A=always Steam; B/X/Y=configurable (g_chordBtn[]). Debounced.
 				{
-					static uint8_t chWant = 0xFF, chCnt = 0;
+					// Per-slot debounce: the chord input is per-slot (g_in[g_curSlot]), so the debounce counter
+					// must be too. The shared-static form worked with 1 controller because slot 0 polled
+					// back-to-back; with N>1, the round-robin poll cycles through every used slot, and the OTHER
+					// slots' non-chord reports reset the counter on every iteration. The counter could never
+					// reach 12 with multiple controllers, making the chord effectively dead.
+					static uint8_t chWant[NSLOT] = {
+						0xFF, 0xFF, 0xFF, 0xFF};
+					static uint8_t chCnt[NSLOT] = {
+						0, 0, 0, 0};
 					uint8_t want = 0xFF;
 					if ((g_in[g_curSlot].buttons & CHORD_BACK4) ==
 					    CHORD_BACK4) {
@@ -494,8 +508,8 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						else if (g_in[g_curSlot].buttons & TB_Y)
 							want = g_chordBtn[2];
 					}
-					if (want != 0xFF && want == chWant) {
-						if (++chCnt >= 12 &&
+					if (want != 0xFF && want == chWant[g_curSlot]) {
+						if (++chCnt[g_curSlot] >= 12 &&
 						    want != g_usbMode &&
 						    modeValid(want) &&
 						    !USBDevice.suspended()) {
@@ -504,8 +518,9 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 							NVIC_SystemReset();
 						}
 					} else {
-						chWant = want;
-						chCnt = (want != 0xFF) ? 1 : 0;
+						chWant[g_curSlot] = want;
+						chCnt[g_curSlot] =
+							(want != 0xFF) ? 1 : 0;
 					}
 				}
 				// compact stream for rf_controller_ui.py -- NON-BLOCKING: skip if CDC TX is backed up (a blocking

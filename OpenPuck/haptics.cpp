@@ -324,11 +324,23 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1)
 			// in the legacy form  E3 [1+rl][05][rid][data]  the controller mis-parses (reads data[0] as a length) and
 			// ignores them. Actuator reports (rid < 0x87, e.g. 0x82 haptic / 0x81 trigger) ACT in the legacy form.
 			//
-			// FULLY TRANSPARENT RELAY (2026-06-19): land ALL config/settings (rid >= 0x87) byte-for-byte like the
-			// real dongle -- haptic-engine config, IMU/haptic subsystem enable 0x30, amplitude 0x34/0x35, LED, 0x9F
-			// power-off. (Earlier we excluded reg 0x30 fearing a landed 0x30=0x00 would freeze the default-on gyro;
-			// now letting it through to test -- WATCH: gyro must keep streaming everywhere, idle/SDL/games.)
-			bool land01 = (m.rid >= 0x87);
+			// Land config/settings (rid >= 0x87) EXCEPT any 0x30 (gyro+haptic subsystem-enable) write, which is
+			// discarded so the controller's DEFAULT-ON state is preserved. Landing Steam's 0x30 verbatim is what the
+			// real dongle does, but it breaks us over the NO-ACK relay: 0x30=0x00 switches the haptic engine OFF
+			// (trackpad haptics stop until Steam re-enables) and would freeze the always-on gyro, and we can't rely
+			// on Steam's later 0x30=0x18 re-enable LANDING (lossy relay). Dropping 0x30 keeps both subsystems at
+			// their default-on state; the rest of the config still lands so triggers are bracketed. (No rewrite/
+			// force of the value -- that was a deviation that didn't fix the buzz. The truly faithful fix for ALL of
+			// this is a reliable ESB-hardware relay; until then, discard 0x30.) [reg][lo][hi] triplets; scan for 0x30.
+			bool has30 = false;
+			if (m.rid == 0x87)
+				for (uint8_t i = 0; (uint16_t)i + 3 <= rl;
+				     i += 3)
+					if (m.data[i] == 0x30) {
+						has30 = true;
+						break;
+					}
+			bool land01 = (m.rid >= 0x87) && !has30;
 			uint8_t p[5 + RELAY_MAXP], plen;
 			if (land01) {
 				p[0] = g_relayOp;

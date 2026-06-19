@@ -52,7 +52,18 @@ volatile uint8_t g_linkRssi = 0;
 volatile uint8_t g_battery = 0;
 
 // ---- internal counters / timers ----
-static uint8_t g_e3pid = 0;
+// ONE monotonic ESB PID for every frame on the session pipe (g_sessBase): keepalive beacon + E7 announce +
+// GET-0x45 poll + haptic relay. The controller dedups PER PIPE by PID alone -- a REPEATED PID is treated as a
+// retransmit and DROPPED (IBEX_REIMPL_SPEC: "repeated PID means retransmit, a new PID means new poll", read from
+// S1>>1&3). The old code ran TWO counters on this one pipe (g_pid for the beacon, g_e3pid for poll/relay); when
+// their PIDs collided the controller dropped a frame as a duplicate -- on a PERFECT link -- and a dropped relay
+// = a lost haptic stop = the ~1/10 latched buzz. A single sequence guarantees consecutive frames never repeat a
+// PID. sessS1() returns the S1 byte: PID in bits[2:1], NO_ACK in bit[0] (beacon=0/acked, poll+relay=1).
+static uint8_t g_sessPid = 0;
+static inline uint8_t sessS1(uint8_t noack)
+{
+	return (uint8_t)(((g_sessPid++ & 3) << 1) | (noack & 1));
+}
 static uint32_t g_stPoll = 0, g_stF1 = 0, g_stF3 = 0;
 static unsigned long g_stMs = 0;
 static uint8_t g_lastSeq = 0;
@@ -83,8 +94,10 @@ static void rfHostFrameOnce(int slot, bool discovery)
 	memset(rftx, 0, sizeof rftx);
 	// LENGTH = 18 (controller's buf[0]==0x12 check validates this)
 	rftx[0] = 0x12;
-	// S1 = PID<<1 | noack0  (matches real puck 00/02/04/06)
-	rftx[1] = (uint8_t)((g_pid++ & 3) << 1);
+	// S1 = PID<<1 | noack0 (acked beacon, matches real puck 00/02/04/06). The SESSION keepalive shares the one
+	// session-pipe PID sequence (sessS1) so it never collides with the poll/relay PID; the DISCOVERY beacon is a
+	// different pipe (g_rfBase/ch2, not our connected controller) so it keeps its own g_pid counter.
+	rftx[1] = discovery ? (uint8_t)((g_pid++ & 3) << 1) : sessS1(0);
 	rftx[2] = 0xE1; // payload[0] marker
 	// payload[1..5] proteus_uuid (LE, as bonded)
 	memcpy(rftx + 3, rec + 0, 4);
@@ -532,7 +545,7 @@ static void rfConnStep()
 	// announce HOST AWAKE: E7 00 00, a few times
 	if (g_connSt == 0) {
 		uint8_t p[3] = { 0xE7, 0x00, g_e7b };
-		rfConnTx(ch, 0x01, p, 3);
+		rfConnTx(ch, sessS1(1), p, 3);
 		if (++g_connStep >= 4) {
 			g_connSt = 1;
 			g_connStep = 0;
@@ -563,29 +576,20 @@ static void rfConnStep()
 		}
 		if ((g_connPoll & 0x1F) == 0) {
 			uint8_t pa[3] = { 0xE7, 0x00, g_e7b };
-			rfConnTx(ch, 0x01, pa, 3);
+			rfConnTx(ch, sessS1(1), pa, 3);
 		} // re-assert awake/version
 		rfConnQueueHapticRelay();
-		// Relay (if any) gets its OWN cycled PID, then the GET poll gets the NEXT one -- so they're always distinct
-		// and the controller never dedups the GET as a retransmit of the relay (that was dropping ~half the replies
-		// during haptics). Advancing g_e3pid even when no relay is pending just skips a PID value (harmless).
+		// Relay (if any) then the GET poll each draw the NEXT PID from the single session sequence, so they're
+		// always distinct (the controller won't dedup the poll as a retransmit of the relay) AND never collide
+		// with the keepalive beacon's PID. sessS1 advances even when no relay is pending (harmless skip).
 		{
-			uint8_t rs1 = (uint8_t)((((g_e3pid++) & 3) << 1) | 1);
-			rfConnFlushRelay(ch, rs1);
+			rfConnFlushRelay(ch, sessS1(1));
 		}
 		{
 			// E3 + TLV [len=02][subtype=01 GET][id=0x45][param]
 			uint8_t p[5] = { 0xE3, 0x02, 0x01, 0x45, g_getParam };
-			// cycle PID (S1 1,3,5,7), NO_ACK=1
-			// cycle PID (S1 0,2,4,6), NO_ACK=0
-			// fixed (matches captured puck poll)
-			uint8_t s1 =
-				(g_e3mode == 1) ?
-					(uint8_t)((((g_e3pid++) & 3) << 1) |
-						  1) :
-				(g_e3mode == 2) ?
-					(uint8_t)(((g_e3pid++) & 3) << 1) :
-					0x07;
+			// poll NO_ACK matches the real puck (=1); g_e3mode==2 is a diagnostic ACK-requested variant.
+			uint8_t s1 = sessS1(g_e3mode == 2 ? 0 : 1);
 			uint8_t rx = rfConnTx(ch, s1, p, 5);
 			if (rx)
 				g_chF1[0]++;

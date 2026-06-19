@@ -95,9 +95,10 @@ bool hapticLinkUp(int slot = -1);
 bool haptic82Blocked(int slot = -1);
 bool hapticRelaySlotOk(int slot);
 void haptic82HostReport(const uint8_t *p, uint16_t n, int slot = -1);
-bool hapticSteamRumble(
-	uint16_t lowFreq,
-	uint16_t highFreq); // queue Steam/Triton output report 0x80 rumble
+// queue a Steam/Triton 0x80 rumble frame. `slot` = bond slot of the originating controller (0..NSLOT-1);
+// defaults to 0 for the legacy single-controller callers. Per-slot so each connected controller can have its
+// own active rumble stream when the host presents multiple gamepads (e.g. 4 XInput devices).
+bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq, uint8_t slot = 0);
 
 // queue + flush the pending host/test/stop relay inside the poll cadence (called from rf_link).
 // rfConnFlushRelay's s1 must carry a PID distinct from the GET poll that follows it (rf_link cycles the shared

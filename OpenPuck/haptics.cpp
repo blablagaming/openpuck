@@ -38,11 +38,12 @@ static unsigned long g_haptic82Ms = 0;
 // a non-zero 0x82 haptic is currently active (awaiting host stop)
 static bool g_haptic82On = false;
 
-// millis of last translated host rumble (0x80)
-static unsigned long g_rumble80Ms = 0;
+// millis of last translated host rumble (0x80), per-slot (4 XInput interfaces each have their own stream)
+static unsigned long g_rumble80Ms[NSLOT] = { 0 };
 
-// Steam/Triton rumble is latched on until an explicit zero report
-static bool g_rumble80On = false;
+// Steam/Triton rumble is latched on until an explicit zero report; tracked per-slot so each controller's
+// stuck-rumble watchdog is independent
+static bool g_rumble80On[NSLOT] = { false, false, false, false };
 
 // when to fire the next post-reconnect haptic re-init (0 = none scheduled)
 static unsigned long g_reinitAt = 0;
@@ -252,7 +253,8 @@ static void hapticCancelPendingOn()
 }
 void haptic82HostReport(const uint8_t *p, uint16_t n, int slot)
 {
-	(void)slot; // the on/off flag is global -- one relay stream keeps the watchdog armed across slots
+	// the on/off flag is global -- one relay stream keeps the watchdog armed across slots
+	(void)slot;
 	if (n < 3)
 		return;
 	g_haptic82Ms = millis();
@@ -263,8 +265,10 @@ void haptic82HostReport(const uint8_t *p, uint16_t n, int slot)
 	// 0x82 is a discrete pad click -- the spurious end-of-movement "click"/buzz the real puck never produces.
 	g_haptic82On = haptic82PayloadOn(p, n);
 }
-bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq)
+bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq, uint8_t slot)
 {
+	if (slot >= NSLOT)
+		return false;
 	// user rumble-strength scale (percent; 200 = double). Clamp to 16-bit.
 	if (g_rumbleScale != 100) {
 		uint32_t l = (uint32_t)lowFreq * g_rumbleScale / 100,
@@ -273,9 +277,12 @@ bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq)
 		highFreq = (h > 0xFFFF) ? 0xFFFF : (uint16_t)h;
 	}
 	bool on = lowFreq || highFreq;
-	if (on && haptic82Blocked())
-		return false; // same settle gate as native Steam haptics
-	if (!on && !hapticLinkUp())
+	// Per-slot settle gate (the per-slot reconnect block + link-up check). 0x82 haptics in Steam mode use the
+	// same gate; for XInput, the host only sends a stream while a controller is connected, so this also doubles
+	// as "no controller here, no relay".
+	if (on && haptic82Blocked(slot))
+		return false;
+	if (!on && !hapticLinkUp(slot))
 		return false;
 
 	// SDL's current Steam/Triton structs define output report 0x80 as:
@@ -294,10 +301,10 @@ bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq)
 	p[6] = (uint8_t)(highFreq & 0xFF);
 	p[7] = (uint8_t)(highFreq >> 8);
 	p[8] = 0;
-	if (!relayEnqueue(0x80, p, sizeof p, 0))
+	if (!relayEnqueue(0x80, p, sizeof p, slot))
 		return false;
-	g_rumble80Ms = millis();
-	g_rumble80On = on;
+	g_rumble80Ms[slot] = millis();
+	g_rumble80On[slot] = on;
 	return true;
 }
 // Queue a pending test-haptic / stop relay (runs inside the poll cadence -- never at raw loop rate). Test
@@ -428,7 +435,10 @@ void hapticInit()
 {
 	g_rqHead = g_rqTail = 0;
 	g_haptic82On = false;
-	g_rumble80On = false;
+	for (int s = 0; s < NSLOT; s++) {
+		g_rumble80On[s] = false;
+		g_rumble80Ms[s] = 0;
+	}
 	// boot: block stale Steam 0x82 until link stable (every slot)
 	for (int s = 0; s < NSLOT; s++)
 		g_hapticBlockUntil[s] = millis() + HAPTIC_RECONNECT_BLOCK_MS;
@@ -449,7 +459,8 @@ void hapticOnReconnect(int slot)
 	// no haptics relayed for the next 3s (per-slot)
 	g_hapticBlockUntil[slot] = millis() + HAPTIC_RECONNECT_BLOCK_MS;
 	g_haptic82On = false;
-	g_rumble80On = false;
+	g_rumble80On[slot] = false;
+	g_rumble80Ms[slot] = 0;
 
 	// drop any haptic ON queued before the link came up
 	hapticCancelPendingOn();
@@ -517,8 +528,14 @@ void hapticTask()
 	if (!g_xbox && g_haptic82On &&
 	    millis() - g_haptic82Ms > HAPTIC_QUIET_MS)
 		g_haptic82On = false;
-	if (g_rumble80On && millis() - g_rumble80Ms > 2500u)
-		hapticSteamRumble(0, 0);
+	// Per-slot stuck-rumble watchdog: if a controller's rumble stream has been "on" without a refresh for
+	// 2.5s, force a zero report to clear the controller's latch. The previous single-stream watchdog
+	// couldn't cover a 4-XInput scenario where only one slot is stuck (it would only fire when the
+	// merged-flag went stale).
+	for (int s = 0; s < NSLOT; s++) {
+		if (g_rumble80On[s] && millis() - g_rumble80Ms[s] > 2500u)
+			hapticSteamRumble(0, 0, (uint8_t)s);
+	}
 	// Haptic activity has gone idle for a while -> fire one re-init to clear any latch it left behind (the buzz
 	// that engages during/after use and won't self-clear, incl. after a mode switch). Fires only after a quiet
 	// gap, so it never interrupts active haptics; the brightness-less re-init is silent (settings, no play, no

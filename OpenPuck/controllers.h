@@ -9,7 +9,7 @@
 //                    argument is the bond slot the report arrived on (0..NSLOT-1, or -1 for the pre-bond
 //                    catch-all). PUSH-style modes (Xbox, puck/lizard) build + send their host report here;
 //                    the puck/lizard mode uses `slot` to fan out to hid[slot]. STREAM-style modes ignore
-//                    `slot` and emit at a fixed cadence from task() reading g_in[0].
+//                    `slot`; STREAM-style modes emit at a fixed cadence from task() reading g_in[s].
 //   task()        -- called every loop(): streaming emit, handshake/subcommand draining, mode-specific upkeep.
 //   isPuck()      -- true for Steam/Lizard (keep the boot CDC composite; different USB lifecycle in setup()).
 //

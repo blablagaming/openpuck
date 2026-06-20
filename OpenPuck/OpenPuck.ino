@@ -47,9 +47,7 @@ void setup()
 	genSerial();
 	ledInit();
 
-	// per-device default RF session address (per-slot). The real generation is below, AFTER loadBonds, so
-	// the address can be derived from the bond UUID for each slot. The pre-load call here is just to
-	// populate the defaults so a slot with no bond doesn't accidentally share the discovery address.
+	// seed defaults so unbonded slots don't share the discovery address
 	for (int s = 0; s < NSLOT; s++)
 		rfGenSessionAddr(s);
 	InternalFS.begin();
@@ -60,9 +58,7 @@ void setup()
 #endif
 	loadCfg();
 	loadBonds();
-	// Now that bonds are loaded, regenerate per-slot session addresses from each bond's UUID. This is
-	// deterministic (a slot's address is stable across reboots) and avoids persisting the address in
-	// bonds.bin -- no schema bump needed.
+	// regenerate per-slot session addresses from each bond UUID (deterministic, stable across reboots)
 	for (int s = 0; s < NSLOT; s++)
 		if (g_slot[s].used)
 			rfGenSessionAddr(s);
@@ -143,8 +139,6 @@ void setup()
 		USBDevice.remoteWakeup();
 		ledWakePulse();
 	} // wake host if bus was sleeping when we (re-)attached
-	// loadBonds() was called earlier (after the bond-UUID-derived session addresses were generated);
-	// this is a no-op now but kept for forward-compat (a future migration to lazy-loading).
 	hapticInit();
 	static const char *MODE_NAME[] = {
 		"STEAM(puck)",	       "XBOX(xinput+mouse)",
@@ -171,10 +165,11 @@ void setup()
 				"#   slot %d: %02X%02X%02X%02X/%02X (uuid %02X%02X%02X%02X %02X%02X%02X%02X)\n",
 				s, g_sessBase[s][0], g_sessBase[s][1],
 				g_sessBase[s][2], g_sessBase[s][3],
-				g_sessPrefix[s], g_slot[s].rec[0], g_slot[s].rec[1],
-				g_slot[s].rec[2], g_slot[s].rec[3],
-				g_slot[s].rec[4], g_slot[s].rec[5],
-				g_slot[s].rec[6], g_slot[s].rec[7]);
+				g_sessPrefix[s], g_slot[s].rec[0],
+				g_slot[s].rec[1], g_slot[s].rec[2],
+				g_slot[s].rec[3], g_slot[s].rec[4],
+				g_slot[s].rec[5], g_slot[s].rec[6],
+				g_slot[s].rec[7]);
 		}
 	}
 	// Hardware watchdog: if loop() ever stops feeding it (wedged radio busy-wait, HardFault spin, blocked CDC

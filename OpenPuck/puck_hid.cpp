@@ -163,7 +163,7 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 				// BLOCKED stop must leave "on" set (controller may be latched -> reconnect stop-burst),
 				// a blocked ON must not set it (nothing reached the controller -> no spurious clicks).
 				if (rid == 0x82)
-					haptic82HostReport(b, n, slot);
+					haptic82HostReport(b, n);
 			}
 		}
 
@@ -218,7 +218,7 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 
 			// track from RELAYED frames only (see the OUTPUT path)
 			if (haptic82)
-				haptic82HostReport(pl, len, slot);
+				haptic82HostReport(pl, len);
 		}
 	}
 	if (Serial.availableForWrite() > 80) {
@@ -475,7 +475,7 @@ static void wakeNudgeTask()
 		hid_mouse_report_t m;
 		m.buttons = 0;
 		m.x = (g_nudgeStep[s] == 1) ? NUDGE_JIGGLE_PX :
-					     -NUDGE_JIGGLE_PX;
+					      -NUDGE_JIGGLE_PX;
 		m.y = 0;
 		m.wheel = 0;
 		m.pan = 0;
@@ -511,7 +511,7 @@ void SteamPuckController::task()
 	// slot. The real puck's per-slot edge-triggered 0x79 prevents re-triggering Steam's connect-chime loop.
 	static bool usbConn[NSLOT] = { 0 };
 	static unsigned long last79[NSLOT] = { 0 }, last7B[NSLOT] = { 0 },
-			      connEdgeMs[NSLOT] = { 0 };
+			     connEdgeMs[NSLOT] = { 0 };
 	for (int s = 0; s < NSLOT; s++) {
 		if (!g_slot[s].used || !hid[s].ready())
 			continue;
@@ -522,7 +522,8 @@ void SteamPuckController::task()
 		// Steam consumes 0x45 -> a loop of connect-time haptic buzzes. Resending until acked still covers
 		// "Steam missed the edge".
 		bool steamAcked = g_steamAliveMs &&
-				  (int32_t)(g_steamAliveMs - connEdgeMs[s]) >= 0;
+				  (int32_t)(g_steamAliveMs - connEdgeMs[s]) >=
+					  0;
 		if (conn != usbConn[s] ||
 		    (conn && !steamAcked && millis() - last79[s] >= 750)) {
 			if (conn && !usbConn[s])

@@ -27,8 +27,7 @@ static void webusbSendBlob()
 	// presents to Steam on 0x79). The blob is sent on the panel's poll, so the slot + up flag change
 	// every ~250ms in normal use.
 	int cs = (g_curSlot >= 0 && g_curSlot < NSLOT) ? g_curSlot : 0;
-	bool up = (g_curSlot >= 0 &&
-		   (millis() - g_connReplyMs[cs]) < 300);
+	bool up = (g_curSlot >= 0 && (millis() - g_connReplyMs[cs]) < 300);
 	uint8_t p[2 + WB_PAYLEN];
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
@@ -73,9 +72,10 @@ static void webusbSendBlob()
 	p[36] = (uint8_t)(g_pollPeriodUs >>
 			  8); // measured poll period (intended 4000)
 	p[37] = OPK_LOG; // logging build? panel shows/hides its log UI
-	p[38] = g_battery[g_curSlot >= 0 && g_curSlot < NSLOT ?
-				  g_curSlot :
-				  0]; // controller battery % (report 0x43); 0=unknown
+	p[38] = g_battery
+		[g_curSlot >= 0 && g_curSlot < NSLOT ?
+			 g_curSlot :
+			 0]; // controller battery % (report 0x43); 0=unknown
 	p[39] = g_linkRssi[g_curSlot >= 0 && g_curSlot < NSLOT ?
 				   g_curSlot :
 				   0]; // RAW signal strength |dBm| (0=no sample)
@@ -169,7 +169,7 @@ void webusbPoll()
 				       (op == 0x03 || op == 0x05) ? 2 :
 				       (op == 0x0A)		  ? 4 :
 								    1;
-			if (op < 0x01 || op > 0x0A) { // resync: drop one byte
+			if (op < 0x01 || op > 0x0C) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
 			}
@@ -209,6 +209,19 @@ void webusbPoll()
 					delay(40);
 					NVIC_SystemReset();
 				}
+
+				// reboot into serial DFU (adafruit-nrfutil)
+			} else if (op == 0x0B) {
+				usb_web.flush();
+				delay(40);
+				enterSerialDfu();
+
+				// reboot into UF2 bootloader (USB mass storage)
+			} else if (op == 0x0C) {
+				usb_web.flush();
+				delay(40);
+				enterUf2Dfu();
+
 			} else if (op == 0x02) {
 				uint8_t f = buf[1], v = buf[2];
 

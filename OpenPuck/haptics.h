@@ -4,11 +4,9 @@
 // a SET sub-TLV inside the E3 poll. We do the same: handleSet()/the console enqueue with relayEnqueue(), and
 // rfConnFlushRelay() emits ONE entry per poll cycle (rf_link.cpp), never at raw loop rate.
 //
-// The queue is a small ring, NOT a single buffer: producers run in USB-ISR context while the consumer may be
-// mid-flush in loop context, and Steam writes settings/calibration as bursts of back-to-back feature reports.
-// A single buffer LOSES reports arriving before the previous flush and can be TORN mid-copy by the ISR.
-// Entries carry up to RELAY_MAXP payload bytes (the RF frame fits 60: [E3][len][05][rid] + payload <= MAXLEN
-// 64); a smaller cap chops multi-register 0x87 settings blocks (LED brightness) and calibration writes.
+// One ring per bond slot: the consumer (rfConnFlushRelay) only drains the current slot's queue, so commands
+// addressed to other slots are never consumed out of turn. ISR producers write under PRIMASK; the consumer
+// runs in loop context and never races the same slot's head pointer.
 //
 // The controller's haptic LATCHES until told to stop. If the host's stop is lost over RF (or the link drops
 // mid-buzz) the actuator whines forever -- so we send 0x82-zero stop bursts on reconnect, but ONLY when a
@@ -43,11 +41,8 @@
 #define HAPTIC_SHUTDOWN_SHOTS 3u
 
 // ---- relay queue (written by puck_hid.cpp, mode_*.cpp, serial_console.cpp; drained by rf_link.cpp) ----
-// Enqueue one host->controller report: rid = report/command id, payload = the bytes AFTER [cmd][len] (what
-// goes on the air). `slot` is the originating bond slot (0..NSLOT-1) or 0xFF for "broadcast to every
-// connected controller" (used by hapticSendShutdown / hapticReinit / test haptics -- the ones that must
-// reach every controller, not just the one that triggered them). ISR-safe (brief PRIMASK critical
-// section). Returns false (dropped) when the ring is full.
+// Enqueue one host->controller report. `slot` = bond slot (0..NSLOT-1) or 0xFF to broadcast to every
+// connected controller (used by hapticSendShutdown / hapticReinit / test haptics). ISR-safe (PRIMASK).
 bool relayEnqueue(uint8_t rid, const uint8_t *payload, uint8_t plen,
 		  uint8_t slot = 0xFF);
 
@@ -94,7 +89,7 @@ static inline bool hapLogPull(uint32_t *, uint8_t *, uint8_t *, uint8_t *,
 bool hapticLinkUp(int slot = -1);
 bool haptic82Blocked(int slot = -1);
 bool hapticRelaySlotOk(int slot);
-void haptic82HostReport(const uint8_t *p, uint16_t n, int slot = -1);
+void haptic82HostReport(const uint8_t *p, uint16_t n);
 // queue a Steam/Triton 0x80 rumble frame. `slot` = bond slot of the originating controller (0..NSLOT-1);
 // defaults to 0 for the legacy single-controller callers. Per-slot so each connected controller can have its
 // own active rumble stream when the host presents multiple gamepads (e.g. 4 XInput devices).
@@ -102,8 +97,7 @@ bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq, uint8_t slot = 0);
 
 // queue + flush the pending host/test/stop relay inside the poll cadence (called from rf_link).
 // rfConnFlushRelay's s1 must carry a PID distinct from the GET poll that follows it (rf_link cycles the shared
-// PID counter), so the controller doesn't dedup the GET as a retransmit of the relay. The flush only emits
-// entries tagged with the CURRENT slot (set by rfConnStep), so each controller only sees its own relay.
+// PID counter), so the controller doesn't dedup the GET as a retransmit of the relay.
 void rfConnQueueHapticRelay();
 void rfConnFlushRelay(uint8_t ch, uint8_t s1);
 

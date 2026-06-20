@@ -308,45 +308,48 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						const uint8_t *rep =
 							&rfrx[idx + 2];
 						bool fresh =
-							(rep[1] != g_lastSeq[g_curSlot]);
+							(rep[1] !=
+							 g_lastSeq[g_curSlot]);
 						// genuine new report vs stale poll-repeat
 						if (fresh) {
 							g_stNew++;
-							g_lastSeq[g_curSlot] = rep[1];
+							g_lastSeq[g_curSlot] =
+								rep[1];
 						}
 						uint32_t bb = btnsOf(rep);
 						// USB remote wakeup on Steam button short press (down + up within 1 s). A long press likely means
 						// the user is powering off the controller, so we ignore it.
 						{
-							static bool steamWasDown =
-								false;
-							static unsigned long
-								steamDownMs = 0;
+							// per-slot: with round-robin polling, a shared static gets
+							// reset by other slots' reports between press and release.
+							static bool steamWasDown
+								[NSLOT] = {};
+							static unsigned long steamDownMs
+								[NSLOT] = {};
 							if (fresh) {
 								bool steamNow =
 									(bb &
 									 TB_STEAM) !=
 									0;
-								// rising edge: record press time
 								if (steamNow &&
-								    !steamWasDown)
-									steamDownMs =
+								    !steamWasDown
+									    [g_curSlot])
+									steamDownMs[g_curSlot] =
 										millis();
-								// falling edge within 1 s -> short press -> wake
 								if (!steamNow &&
-								    steamWasDown &&
-								    millis() - steamDownMs <
+								    steamWasDown
+									    [g_curSlot] &&
+								    millis() - steamDownMs[g_curSlot] <
 									    1000u &&
 								    USBDevice
 									    .suspended()) {
 									USBDevice
 										.remoteWakeup();
 									ledWakePulse();
-									// post-resume nudge (host needs real input to actually wake)
 									if (g_active)
 										g_active->wakeEvent();
 								}
-								steamWasDown =
+								steamWasDown[g_curSlot] =
 									steamNow;
 							}
 						}
@@ -364,10 +367,16 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 							// used slot, so the timer never reaches 2s.
 							static unsigned long
 								offHoldMs[NSLOT] = {
-									0, 0, 0, 0};
-							static bool offFired[NSLOT] = {
-								false, false, false,
-								false};
+									0, 0, 0,
+									0
+								};
+							static bool offFired
+								[NSLOT] = {
+									false,
+									false,
+									false,
+									false
+								};
 							if ((bb & (TB_STEAM |
 								   TB_Y)) ==
 							    (TB_STEAM | TB_Y)) {
@@ -387,7 +396,8 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 								if (g_usbMode !=
 								    MODE_STEAM) {
 									// stream modes read g_in
-									g_in[g_curSlot].buttons &=
+									g_in[g_curSlot]
+										.buttons &=
 										~(uint32_t)(TB_STEAM |
 											    TB_Y);
 									// push modes read btnsOf(rep): TB_Y in rep[2],
@@ -404,32 +414,40 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 											   16);
 								}
 							} else {
-								offHoldMs[g_curSlot] = 0;
+								offHoldMs[g_curSlot] =
+									0;
 								offFired[g_curSlot] =
 									false;
 							}
 						}
 						g_in[g_curSlot].lx =
 							(int16_t)s16off(rep, 8);
-						g_in[g_curSlot].ly = (int16_t)s16off(rep,
-									  10);
-						g_in[g_curSlot].rx = (int16_t)s16off(rep,
-									  12);
-						g_in[g_curSlot].ry = (int16_t)s16off(rep,
-									  14);
+						g_in[g_curSlot].ly =
+							(int16_t)s16off(rep,
+									10);
+						g_in[g_curSlot].rx =
+							(int16_t)s16off(rep,
+									12);
+						g_in[g_curSlot].ry =
+							(int16_t)s16off(rep,
+									14);
 						g_in[g_curSlot].lt =
 							trigU8(u16off(rep, 4));
 						// for the Switch digital-trigger threshold
 						g_in[g_curSlot].rt =
 							trigU8(u16off(rep, 6));
-						g_in[g_curSlot].lpx = (int16_t)s16off(rep,
-									   16);
-						g_in[g_curSlot].lpy = (int16_t)s16off(rep,
-									   18);
-						g_in[g_curSlot].rpx = (int16_t)s16off(rep,
-									   22);
-						g_in[g_curSlot].rpy = (int16_t)s16off(rep,
-									   24);
+						g_in[g_curSlot].lpx =
+							(int16_t)s16off(rep,
+									16);
+						g_in[g_curSlot].lpy =
+							(int16_t)s16off(rep,
+									18);
+						g_in[g_curSlot].rpx =
+							(int16_t)s16off(rep,
+									22);
+						g_in[g_curSlot].rpy =
+							(int16_t)s16off(rep,
+									24);
 						// IMU lives at report bytes 0x22..0x2D (rep[34..45]). Decode it ONLY when a FULL 46-byte report was
 						// actually received -- bounded by `end` (the received length), NOT sizeof(rfrx). The outer gate is
 						// tlen>=28 (enough for buttons/sticks/pads, which end at rep[27]), so a short 0x45 (button-only, or
@@ -438,12 +456,20 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						if (tlen >= 46 &&
 						    (size_t)(idx + 2) + 46 <=
 							    (size_t)end)
-							imuFrom45(rep, &g_in[g_curSlot].ax,
-								  &g_in[g_curSlot].ay,
-								  &g_in[g_curSlot].az,
-								  &g_in[g_curSlot].gx,
-								  &g_in[g_curSlot].gy,
-								  &g_in[g_curSlot].gz);
+							imuFrom45(
+								rep,
+								&g_in[g_curSlot]
+									 .ax,
+								&g_in[g_curSlot]
+									 .ay,
+								&g_in[g_curSlot]
+									 .az,
+								&g_in[g_curSlot]
+									 .gx,
+								&g_in[g_curSlot]
+									 .gy,
+								&g_in[g_curSlot]
+									 .gz);
 						// Mode-switch chord (all 4 back + face): don't leak the face press to the host. g_in[g_curSlot].buttons stays
 						// intact so the chord detector still fires; per-mode builders mask the same bits while back-4 held.
 						if ((bb & CHORD_BACK4) ==
@@ -457,8 +483,8 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						// g_in); PUSH modes (Xbox, puck/lizard) build + send their host report here.
 						if (g_active)
 							g_active->onReport45(
-								g_curSlot, rep, fresh,
-								tlen);
+								g_curSlot, rep,
+								fresh, tlen);
 						lastRep = rep;
 						lastTlen = tlen;
 					} else if (ttype == 6 &&
@@ -474,12 +500,16 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						const uint8_t *rep =
 							&rfrx[idx + 2];
 						// 0x43 body[1] (~0x5e=94) reads as battery % (sniff-derived)
-						if (rep[0] == 0x43 && tlen >= 3 && g_curSlot >= 0 &&
+						if (rep[0] == 0x43 &&
+						    tlen >= 3 &&
+						    g_curSlot >= 0 &&
 						    g_curSlot < NSLOT)
-							g_battery[g_curSlot] = rep[2];
+							g_battery[g_curSlot] =
+								rep[2];
 						if (g_active)
 							g_active->onAuxReport(
-								g_curSlot, rep[0], rep + 1,
+								g_curSlot,
+								rep[0], rep + 1,
 								(uint8_t)(tlen -
 									  1));
 					}
@@ -493,22 +523,28 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 					// slots' non-chord reports reset the counter on every iteration. The counter could never
 					// reach 12 with multiple controllers, making the chord effectively dead.
 					static uint8_t chWant[NSLOT] = {
-						0xFF, 0xFF, 0xFF, 0xFF};
-					static uint8_t chCnt[NSLOT] = {
-						0, 0, 0, 0};
+						0xFF, 0xFF, 0xFF, 0xFF
+					};
+					static uint8_t chCnt[NSLOT] = { 0, 0, 0,
+									0 };
 					uint8_t want = 0xFF;
-					if ((g_in[g_curSlot].buttons & CHORD_BACK4) ==
-					    CHORD_BACK4) {
-						if (g_in[g_curSlot].buttons & TB_A)
+					if ((g_in[g_curSlot].buttons &
+					     CHORD_BACK4) == CHORD_BACK4) {
+						if (g_in[g_curSlot].buttons &
+						    TB_A)
 							want = MODE_STEAM;
-						else if (g_in[g_curSlot].buttons & TB_B)
+						else if (g_in[g_curSlot].buttons &
+							 TB_B)
 							want = g_chordBtn[0];
-						else if (g_in[g_curSlot].buttons & TB_X)
+						else if (g_in[g_curSlot].buttons &
+							 TB_X)
 							want = g_chordBtn[1];
-						else if (g_in[g_curSlot].buttons & TB_Y)
+						else if (g_in[g_curSlot].buttons &
+							 TB_Y)
 							want = g_chordBtn[2];
 					}
-					if (want != 0xFF && want == chWant[g_curSlot]) {
+					if (want != 0xFF &&
+					    want == chWant[g_curSlot]) {
 						if (++chCnt[g_curSlot] >= 12 &&
 						    want != g_usbMode &&
 						    modeValid(want) &&
@@ -569,15 +605,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 // and consumed by the decode (g_in[g_curSlot]) and the haptic flush.
 static void rfConnStep()
 {
-	// count + find the next used slot, starting AFTER the previous cycle's slot (round-robin).
-	int n = 0;
-	for (int s = 0; s < NSLOT; s++)
-		if (g_slot[s].used)
-			n++;
-	if (n == 0) {
-		g_curSlot = -1;
-		return;
-	}
+	// find the next used slot, starting AFTER the previous cycle's slot (round-robin).
 	int start = (g_curSlot < 0) ? 0 : ((g_curSlot + 1) % NSLOT);
 	int slot = -1;
 	for (int k = 0; k < NSLOT; k++) {

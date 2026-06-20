@@ -365,10 +365,6 @@ static void jcBuildStickCal()
 // Manual-pairing (subcommand 0x01) reply payloads. A real Switch runs this 3-stage BT key exchange over USB so it
 // can register the pad (Steam/hid-nintendo do not). The Switch only validates the shape, not the key contents. Each
 // is the 31-byte reply body following the 0x21 input prefix + ack(0x81) + echoed-subcommand(0x01).
-// type 1: echo type + controller BT addr + "Pro Controller" name
-// 31-byte payload uses the per-slot MAC; we fill this on demand.
-static const uint8_t BT_PAIR_1_BODY[7] = { 0x01, 0x00, 0x00, 0x00,
-					   0x00, 0x00, 0x00 };
 static const uint8_t BT_PAIR_2[31] = { // type 2: LTK exchange
 	0x02, 0xE5, 0xC8, 0xE4, 0x92, 0x05, 0xFF, 0xC9, 0x8A, 0x7D, 0xEA,
 	0x15, 0xF6, 0x19, 0xBA, 0x82, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -512,7 +508,7 @@ static void jcSubcmd(uint8_t slot, uint8_t sub, const uint8_t *args,
 		p[12] = 0x81; // pairing ACK
 		if (t == 1) {
 			// echo type + this slot's MAC + "Pro Controller" name
-			p[14] = BT_PAIR_1_BODY[0];
+			p[14] = 0x01;
 			memcpy(&p[15], g_jcMac[slot], 6);
 			p[21] = 0x00;
 			p[22] = 0x25;

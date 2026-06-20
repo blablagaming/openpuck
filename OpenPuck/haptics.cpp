@@ -51,8 +51,15 @@ struct RelayMsg {
 	uint8_t rid, len;
 	uint8_t data[RELAY_MAXP];
 };
-// deep enough to hold a full Steam settings/LED transaction burst without loss
-#define RELAY_QLEN 32
+// Deep enough to hold a FULL Steam reconnect handshake burst without eviction. MEASURED: on reconnect Steam
+// dumps ~72 config/haptic frames (identity, transport, 0x87 engine enable/config/disable, 0x81 resets) as a
+// tight burst; the relay drains 1-per-poll (~4ms, like the real dongle, whose handshake spans ~360ms). With the
+// old 32-deep ring the burst overflowed and the drop-oldest eviction discarded ~9 frames -- and the handshake
+// is an ORDERED sequence (enable->config->disable->reset), so dropping ANY frame leaves the controller's haptic
+// engine in a corrupt state: a lost 30=00/0x81 -> engine stays driven = stuck BUZZ; a lost 30=18 -> engine stays
+// disabled = trackpad haptics dead. 128 holds the whole burst so nothing is evicted and the engine ends in the
+// state Steam intended. (~8KB RAM.)
+#define RELAY_QLEN 128
 static RelayMsg g_rq[RELAY_QLEN];
 static volatile uint8_t
 	g_rqHead = 0,
@@ -93,21 +100,11 @@ bool relayEnqueue(uint8_t rid, const uint8_t *payload, uint8_t plen)
 	__set_PRIMASK(pm);
 	return true;
 }
-// Relay a haptic actuator report (0x80-0x86). A STOP (0x82 gain-0 / 0x80 zero) is enqueued HAPTIC_STOP_BURST
-// times ACROSS poll cycles (distinct NO-ACK frames), not retransmitted in-cycle: an in-cycle same-PID retransmit
-// RE-TRIGGERS the actuator (the controller does NOT dedup our raw-radio retransmits -> extra clicks / a buzz on
-// connect -- proven on hardware), so reliable-delivery-by-retransmit is NOT viable here. Spreading distinct stop
-// frames across cycles raises the odds one lands without re-firing. ON pulses go once (bursting ON = stacked
-// clicks). A dropped stop over the NO-ACK relay is what latches the actuator = the persistent buzz.
+// Relay a haptic actuator report (0x80-0x86) ONCE, verbatim -- like the real dongle. (No stop-burst: the
+// dongle relays each frame single-shot; bursting/retransmitting deviates and re-triggers the actuator.)
 bool relayHaptic(uint8_t rid, const uint8_t *p, uint8_t n)
 {
-	bool stop = (rid == 0x82 && n >= 3 && p[2] == 0) ||
-		    (rid == 0x80 && n >= 1 && p[0] == 0);
-	uint8_t reps = stop ? HAPTIC_STOP_BURST : 1u;
-	bool ok = false;
-	for (uint8_t i = 0; i < reps; i++)
-		ok = relayEnqueue(rid, p, n) || ok;
-	return ok;
+	return relayEnqueue(rid, p, n);
 }
 
 #if OPK_LOG
@@ -322,23 +319,11 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1)
 			// On-air sub-TLV framing. CONFIRMED from real puck<->controller sniffs (puck_sniffer): config/settings
 			// reports (rid >= 0x87) are only ACTED ON in the type-01 + inner-len form  E3 [2+rl][01][rid][innerlen][data];
 			// in the legacy form  E3 [1+rl][05][rid][data]  the controller mis-parses (reads data[0] as a length) and
-			// ignores them. Actuator reports (rid < 0x87, e.g. 0x82 haptic / 0x81 trigger) ACT in the legacy form.
+			// ignores them. Actuator reports (rid < 0x87, e.g. 0x82 haptic / 0x81 reset) ACT in the legacy form.
 			//
-			// Land ALL config/settings (rid >= 0x87) like the real dongle, but FORCE THE GYRO-ENABLE BIT ON in any
-			// 0x30 subsystem-enable write. 0x30 register = [reg][lo][hi]; lo bit 0x10 = gyro/IMU, bit 0x08 = haptic
-			// engine. We require gyro ALWAYS streaming (default-on; SDL-without-Steam and the emulated modes read it
-			// raw), but we MUST let Steam's haptic enable/DISABLE through: PROVEN from a buzz capture -- Steam's
-			// connect handshake relays an 0x81 haptic TRIGGER then a 0x30=0x00 that DISABLES (stops) the engine; if
-			// we discard 0x30 the stop is lost and the trigger's haptic runs forever = the connect buzz. Forcing
-			// ONLY bit 0x10 on (|= 0x10) passes the haptic bit verbatim while pinning gyro:
-			//   Steam 30=18 -> 30=18 (gyro on, haptic on)   Steam 30=00 -> 30=10 (gyro on, haptic OFF = stop)
-			// (Earlier tries: discard 0x30 -> lost stop -> buzz; land verbatim -> 30=00 freezes gyro; force 0x18
-			// -> haptic bit never clears so the engine never stops -> buzz/no-haptics. |=0x10 is the only correct one.)
-			if (m.rid == 0x87)
-				for (uint8_t i = 0; (uint16_t)i + 3 <= rl;
-				     i += 3)
-					if (m.data[i] == 0x30)
-						m.data[i + 1] |= 0x10;
+			// PURE VERBATIM: land config/settings (rid >= 0x87) in type-01, send actuators (< 0x87) legacy. No
+			// rewrite of any register (incl. 0x30) -- Steam owns the haptic engine + gyro exactly as on a real
+			// puck; we just translate framing.
 			bool land01 = (m.rid >= 0x87);
 			uint8_t p[5 + RELAY_MAXP], plen;
 			if (land01) {
@@ -458,18 +443,28 @@ void hapticTask()
 	}
 	wasHapticLinkUp = up;
 	// (Connect-time re-init flood removed -- the stop-burst is the real fix; see hapticOnReconnect.)
-	// Controller power-off on host SLEEP: send the power-off command (0x9F "off!") the instant the USB bus
-	// suspends, like the real puck. BUT only when USB power (VBUS) is still present -- i.e. a genuine host sleep,
-	// NOT a cable unplug. Pulling the dongle ALSO trips the suspend edge (in the brief window it runs on residual
-	// power), and we must NOT kill the controller then; it should only power off on a shutdown command or a real
-	// host sleep. VBUSDETECT is 1 while the cable still delivers 5V, 0 once unplugged. wasSusp starts true so a
-	// boot-into-suspended state never false-fires.
+	// Controller power-off on host SLEEP (0x9F "off!"), like the real puck -- but only after the bus stays
+	// SUSPENDED for SUSPEND_OFF_MS, not on the bare edge. PROVEN from a capture: firing on the edge killed the
+	// controller mid-glide on a brief USB selective-suspend (host idle power-mgmt, indistinguishable from sleep at
+	// the edge) -> disconnect -> reconnect-handshake churn that read as a stuck buzz / dropped haptics. A real
+	// sleep persists; a selective-suspend resumes in << 1s, so the timer never elapses and we don't power off.
+	// Guards: VBUS present (a cable unplug also suspends but must NOT power-off the controller), once per suspend.
+	// wasSusp starts true so a boot-into-suspended state never false-fires.
 	static bool wasSusp = true;
+	static unsigned long suspMs = 0;
+	static bool offSent = false;
 	bool susp = USBDevice.suspended();
 	bool vbus = (NRF_POWER->USBREGSTATUS &
 		     POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
-	if (susp && !wasSusp && vbus)
+	if (susp && !wasSusp)
+		suspMs = millis(); // suspend edge -> start the persistence timer
+	if (susp && !offSent && vbus &&
+	    (unsigned long)(millis() - suspMs) >= SUSPEND_OFF_MS) {
 		hapticSendShutdown();
+		offSent = true; // once per suspend
+	}
+	if (!susp)
+		offSent = false; // resumed -> re-arm for the next genuine sleep
 	wasSusp = susp;
 	// Steam-mode: host went quiet -> mark the 0x82 stream inactive. Do NOT synthesize a stop: trackpad haptics
 	// are one-shot pulses, so firing a 0x82-zero ~HAPTIC_QUIET_MS after a swipe ends is the extra end-of-movement

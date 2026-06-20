@@ -17,8 +17,8 @@ Adafruit_USBD_WebUSB usb_web;
 //                [loopPeriod_lo][loopPeriod_hi][loopWorstIdx][loopWorstUs_lo][loopWorstUs_hi]
 //                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
 //                [gitDirty][gitHash 12B ASCII, NUL-padded][rumbleScale][swPro120][swGyroScale10][raw accel ax ay az 3x s16 LE]
-// keep the blob under 64 bytes total (readBlob reads one 64-byte packet)
-#define WB_PAYLEN 60
+// keep the blob under 64 bytes total (readBlob reads one 64-byte packet); 2-byte header + payload
+#define WB_PAYLEN 61
 static void webusbSendBlob()
 {
 	if (!usb_web.connected())
@@ -28,8 +28,8 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (7 = +raw accel; 6 = +swPro120/gyroScale; 5 = +rumbleScale)
-	p[2] = 7;
+	// protocol version (8 = +bootResetReas; 7 = +raw accel; 6 = +swPro120/gyroScale; 5 = +rumbleScale)
+	p[2] = 8;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -90,6 +90,9 @@ static void webusbSendBlob()
 		int16_t a[3] = { g_in.ax, g_in.ay, g_in.az };
 		memcpy(&p[56], a, 6);
 	} // raw accelerometer for scale diagnostics (protocol v7)
+	// last MCU reset cause (protocol v8): low byte of the captured RESETREAS (bit0 PIN, 1 DOG/watchdog, 2 SREQ/
+	// software, 3 LOCKUP; 0 = power-on). Surfaces the reboot-on-buzz cause in the panel without the CDC console.
+	p[62] = (uint8_t)g_bootResetReas;
 	usb_web.write(p, sizeof p);
 	usb_web.flush();
 }

@@ -92,6 +92,7 @@
         <div class="stat logonly"><div class="k">Slowest stage</div><div class="v" id="stWorst">—</div></div>
         <div class="stat logonly"><div class="k">Poll period act/want</div><div class="v" id="stPollPer">—</div></div>
         <div class="stat"><div class="k">Build (git)</div><div class="v" id="stBuild">—</div></div>
+        <div class="stat"><div class="k">Last reset</div><div class="v" id="stReset">—</div></div>
       </div>
       <p class="note" style="margin-top:8px"><strong>IMU (raw):</strong> <span id="stImu" style="font-family:ui-monospace,Menlo,monospace">—</span><br>
         Raw SC2 accel (before scaling). This controller is a ±2 g sensor (~16384 = 1 g); the Switch report divides it by 4 to present the genuine ±8 g (4096 = 1 g) scale so the console's gravity-correction engages and the gyro stops drifting.</p>
@@ -295,6 +296,13 @@ function applyBlob(p){
     const ax=s16(54),ay=s16(56),az=s16(58);
     const amag=Math.round(Math.sqrt(ax*ax+ay*ay+az*az));
     $("#stImu").textContent = `a=(${ax}, ${ay}, ${az})  |a|=${amag}`;
+  }
+  // last MCU reset cause (protocol v8): low byte of RESETREAS at p[60]. Bits: 0 PIN, 1 watchdog, 2 software, 3 lockup.
+  if(p.length>60){ const rr=p[60]; const r=[];
+    if(rr&1)r.push("pin"); if(rr&2)r.push("WATCHDOG"); if(rr&4)r.push("software"); if(rr&8)r.push("LOCKUP");
+    const bad=(rr&2)||(rr&8);   // watchdog/lockup = a hang or fault
+    $("#stReset").innerHTML = rr===0 ? '<span class="pill up">power-on</span>'
+      : '<span class="pill '+(bad?'dn':'up')+'">'+r.join("+")+'</span> (0x'+rr.toString(16)+')';
   }
   { const sel=$("#swRate"); if(document.activeElement!==sel) sel.value=swProRate; }
   { const sel=$("#swGyro"); if(document.activeElement!==sel) sel.value=swGyro10; }

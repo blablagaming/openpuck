@@ -77,6 +77,10 @@ extern uint8_t g_bootMode;
 extern bool g_debugCdcThisBoot;
 void armDebugCdcNextBoot(); // persist the one-shot (caller reboots)
 
+// RESETREAS captured at boot (setup() reads + clears the sticky register). Surfaced over CDC and WebUSB so the
+// last MCU reset cause is visible: low bits = RESETPIN(0) DOG/watchdog(1) SREQ/software(2) LOCKUP(3). 0 = power-on.
+extern uint32_t g_bootResetReas;
+
 // persisted, runtime-tunable config:
 extern int g_mDiv, g_mFric; // xbox/lizard mouse sensitivity divisor / friction%
 extern uint8_t g_abSwap; // 1 = swap A/B and X/Y (Nintendo face-button layout)

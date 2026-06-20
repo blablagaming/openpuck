@@ -147,23 +147,18 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 			// we're still presenting lizard (-> buzz loop).
 			hostStampAlive();
 		}
-		// Post-resume mute also gates haptics: while onReport45 is muted Steam reads NO 0x45 back, which is the
-		// exact condition under which Steam loops the same haptic command (-> connect/wake buzz loop).
+		// PURE VERBATIM RELAY (like the real dongle): forward every actuator report 0x80-0x86 to the connected
+		// controller as-is. Steam owns the haptic engine; we inject/gate/rewrite nothing. The only gates kept are
+		// OpenPuck-environment ones the always-connected real puck never faces: relay only to the CONNECTED slot
+		// (we expose 4), only while the RF link is up (else it goes nowhere), NOT while presenting lizard (Steam
+		// isn't reading 0x45 back -> it would buzz-loop), and not during the brief post-resume input mute.
 		bool muted = g_resumeMs &&
 			     millis() - g_resumeMs < POST_RESUME_MUTE_MS;
 		if (rid >= 0x80 && rid <= 0x86 && n >= 1 &&
-		    hapticRelaySlotOk(slot) && !lizardActive() && !muted) {
-			if (!haptic82Blocked()) {
-				relayHaptic(rid, b,
-					    (uint8_t)(n > RELAY_MAXP ?
-							      RELAY_MAXP :
-							      n));
-				// Track on/off from what was actually RELAYED (= the controller's believed state): a
-				// BLOCKED stop must leave "on" set (controller may be latched -> reconnect stop-burst),
-				// a blocked ON must not set it (nothing reached the controller -> no spurious clicks).
-				if (rid == 0x82)
-					haptic82HostReport(b, n);
-			}
+		    hapticRelaySlotOk(slot) && hapticLinkUp() &&
+		    !lizardActive() && !muted) {
+			relayEnqueue(rid, b,
+				     (uint8_t)(n > RELAY_MAXP ? RELAY_MAXP : n));
 		}
 
 		if (Serial.availableForWrite() > 80) {
@@ -196,37 +191,29 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 		// capture EVERY relayed feature-1 command for the WebUSB capture view (haptics, LED SET_LED_COLOR,
 		// 0x87 settings, 0x9F power-off). Log shows cmd as "rid"; bytes start [cmd][len]...
 		hapLogAdd((uint8_t)slot, cmd, b, n);
-		bool haptic82 = (cmd == 0x82 && len <= pln);
-		// ALL actuator reports 0x80-0x86 (not just 0x82) are gated like a haptic: blocked during the connect
-		// settle / lizard / post-resume mute. This matters at CONNECT -- Steam's handshake fires 0x81 haptic
-		// TRIGGERS, and since our framing discards Steam's bracketing 0x87 engine-config (whitelist) but the
-		// 0x81 still lands, those triggers played on an un-configured engine = the spurious connect buzzes the
-		// real puck never makes. Holding 0x80-0x86 off during the 3s settle suppresses them. 0x87+ settings and
-		// 0x9F power-off are NOT actuators and still relay. (The OUTPUT path already gates 0x80-0x86 this way;
-		// this aligns the feature path, which previously leaked 0x81/0x83-0x86 straight through.)
+		// PURE VERBATIM RELAY of the feature-0x01 passthrough, like the real dongle: forward every command to the
+		// connected controller as-is -- config/settings (0x87+), LED, 0x9F power-off, AND the haptic actuators
+		// (0x80-0x86). No 0x30 rewrite, no 0x81 special-case, no connect-settle block, no stop-burst: Steam owns
+		// the engine and the gyro exactly as on a real puck. Gates kept are only the OpenPuck-environment ones:
+		// connected slot; and for the haptic ACTUATORS (0x80-0x86) also link-up / not-lizard / not-post-resume
+		// (relaying a play while presenting lizard, i.e. Steam not reading 0x45, loops the haptic). Config/LED/
+		// power-off relay regardless (they're not plays and the controller needs them to track Steam's settings).
 		bool isActuator = (cmd >= 0x80 && cmd <= 0x86);
-
 		bool muted = g_resumeMs &&
 			     millis() - g_resumeMs < POST_RESUME_MUTE_MS;
-
-		// never push haptics while presenting lizard (Steam isn't reading 0x45 -> would buzz-loop)
-		bool relayOk = hapticRelaySlotOk(slot) &&
-			       !(isActuator && (lizardActive() || muted));
-		if (relayOk && (!isActuator || !haptic82Blocked())) {
-			// Relay the DECLARED length (up to the 60B RF frame ceiling), not a truncation: Steam's
-			// multi-register 0x87 settings blocks (LED brightness) and calibration writes exceed the old
-			// 18B cap, and the chopped frames were why those settings never landed on the controller.
+		bool relayOk =
+			hapticRelaySlotOk(slot) &&
+			(!isActuator ||
+			 (hapticLinkUp() && !lizardActive() && !muted));
+		if (relayOk) {
+			// Relay the DECLARED length (up to the 60B RF frame ceiling); Steam's multi-register 0x87 settings
+			// blocks (LED brightness) and calibration writes exceed the old 18B cap.
 			uint8_t rl = (len <= pln) ? len : (uint8_t)pln;
 			if (len > RELAY_MAXP && Serial.availableForWrite() > 60)
 				Serial.printf(
 					"# RELAY TRUNC cmd=%02X len=%u>%u\n",
 					cmd, len, (unsigned)RELAY_MAXP);
-			// relayHaptic bursts a 0x82/0x80 STOP (gain/type 0); non-haptic cmds enqueue once, unchanged.
-			relayHaptic(cmd, pl, rl);
-
-			// track from RELAYED frames only (see the OUTPUT path)
-			if (haptic82)
-				haptic82HostReport(pl, len);
+			relayEnqueue(cmd, pl, rl);
 		}
 	}
 	if (Serial.availableForWrite() > 80) {

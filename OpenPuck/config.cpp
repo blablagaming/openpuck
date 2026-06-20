@@ -13,6 +13,7 @@ bool g_persistMode = false;
 uint8_t g_bootMode = 0xFF;
 
 bool g_debugCdcThisBoot = false;
+uint32_t g_bootResetReas = 0; // RESETREAS captured at boot (setup()); shown over CDC + WebUSB
 
 // persisted one-shot arm, stored in Cfg.rsvd0 (1 = keep CDC for the next boot)
 static uint8_t g_debugCdc = 0;

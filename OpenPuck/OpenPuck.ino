@@ -145,6 +145,22 @@ void setup()
 	Serial.printf("# copycat up: unit=%s board=%s, mode=%s\n", g_unit,
 		      g_board,
 		      MODE_NAME[g_usbMode <= MODE_MAX ? g_usbMode : 0]);
+	// Reset-cause diagnostics: RESETREAS bits are STICKY (accumulate across resets) -- read then clear by writing
+	// 1s back. Tells us why the MCU last rebooted: DOG=watchdog (loop hang/8s timeout), SREQ=software
+	// (NVIC_SystemReset, e.g. the mode-switch chord), RESETPIN=button, OFF/LPCOMP=wake. A bare boot (power-on)
+	// shows 0. Decodes the reboot-on-buzz report without needing to catch it live.
+	{
+		uint32_t rr = NRF_POWER->RESETREAS;
+		g_bootResetReas = rr;	   // stash for WebUSB before clearing
+		NRF_POWER->RESETREAS = rr; // write-1-to-clear so the NEXT boot's cause is isolated
+		Serial.printf(
+			"# resetreas=0x%08lX%s%s%s%s%s\n", (unsigned long)rr,
+			(rr & POWER_RESETREAS_RESETPIN_Msk) ? " PIN" : "",
+			(rr & POWER_RESETREAS_DOG_Msk) ? " WATCHDOG" : "",
+			(rr & POWER_RESETREAS_SREQ_Msk) ? " SOFTRESET" : "",
+			(rr & POWER_RESETREAS_LOCKUP_Msk) ? " LOCKUP" : "",
+			(rr == 0) ? " (power-on)" : "");
+	}
 	if (puckMode)
 		Serial.printf(
 			"# puck USB: %s\n",

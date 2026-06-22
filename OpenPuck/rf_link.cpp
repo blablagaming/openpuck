@@ -761,16 +761,6 @@ void rfLinkTask()
 	// that's powering off isn't immediately re-woken/reconnected.
 	if (g_rfHost && millis() - g_connCooldown > 2500) {
 		bool connNow = anySlotLinkUp();
-		// allUp = every BONDED slot currently has a link. Discovery stays aggressive until then so a
-		// controller joining after another is already connected still finds the puck quickly -- throttling
-		// discovery the moment ONE slot links up was starving the late joiner of beacons (it never showed up).
-		bool allUp = true;
-		for (int s = 0; s < NSLOT; s++)
-			if (g_slot[s].used &&
-			    millis() - g_connReplyMs[s] >= 300) {
-				allUp = false;
-				break;
-			}
 		// session keepalive on the clean channel: every loop while connecting (fast), every 25ms once connected
 		// (every-loop beaconing also hammers the session ch and steals reply slots from the poll). The real puck
 		// sends NO E1 on its session channel; gated by g_e1keepalive ('m') so this can be A/B'd on hardware --
@@ -782,14 +772,13 @@ void rfLinkTask()
 			for (int s = 0; s < NSLOT; s++)
 				rfHostFrameOnce(s, false);
 		}
-		// discovery beacon on ch2 (where a searching controller looks). Cadence:
-		//   nobody connected  -> every loop (fastest cold-boot connect)
-		//   some but not all   -> 40 ms (~25 Hz): a late joiner still connects in ~1 s without the
-		//                          every-loop beacon stealing the connected controller's poll budget --
-		//                          important when a slot is bonded but its controller is left off
-		//   all connected      -> 200 ms (keep the rendezvous warm)
-		uint32_t discEvery = allUp ? 200u : (connNow ? 40u : 0u);
-		if (millis() - g_lastDisc >= discEvery) {
+		// discovery beacon on ch2 (where a searching controller looks): every loop when nothing is
+		// connected (fastest cold-boot/late-joiner connect), every 200ms once ANY controller is linked.
+		// Matches main: while a slot is connected, ch2 discovery shares g_sessCh's air budget, so beaconing
+		// faster than 200ms (the old allUp-gated 40ms path) just steals reply windows from the connected
+		// controller -> reply-rate sag -> >1500ms gaps -> spurious hapticOnReconnect re-init. A late joiner
+		// still enumerates within ~1s at 200ms.
+		if (millis() - g_lastDisc >= (connNow ? 200u : 0u)) {
 			g_lastDisc = millis();
 			g_rfCh = 2;
 			for (int s = 0; s < NSLOT; s++)

@@ -48,17 +48,28 @@ the biggest one being that you can use inputs when a high privilege application 
 Additionally it has some shortcuts that might be useful: Steam + L5/R5 will do volume control, RB is Alt so you can RB + Select to move through windows, LB is Ctrl 
 and Steam + L4 ls Ctrl + Alt + Delete.
 
-# How to use it
+# How to install/use it
 You will need to flash OpenPuck.ino onto a compatible microcontroller. See [build instructions document](./docs/BUILD_AND_DEPLOY.md) for more details.
+
+# Pairing
+Both OpenPuck and the controller need to be hooked up to the same machine with a data capable USB C cable at the same time and Steam must be running. Steam should in most cases automatically pop up a menu to pair the controller. If not, you can go to Settings -> Controllers and press "Add Controller".
+
+If you want to use the second slot for OpenPuck, you'll need to first turn the controller off and then hold LB + A + Steam to turn the controller back on (the chime when the controller comes on in this mode sounds different). Then connect the USB C cable and continue to pair.
+
+Switching slots requires turning the controller off (Steam + Y if steam is running, Steam + Y held for 2 seconds if Steam isn't running or if you're in a different mode, or just hold the Steam button for an eternity until the controller shuts off) and then you hold RB for slot 1 and LB for slot 2 while holding A and Steam to turn the controller back on.
 
 # Configuration
 A webusb based configuration UI is available [here](https://safijari.github.io/openpuck/). It allows Switching the mode manually and changing the back button mapping for other modes among other things. This will likely only work in Chrome and Edge and needs the pro micro to be connected via USB to the same computer for it to function. Note that it might not work in all modes on all machines but should always work in the Steam Controller mode (which you can revert to with back-4 + A).
+
+# 3D Printed Cases
+- [jaki-gh](https://github.com/jaki-gh) has contributed a 3D printable housing with OpenPuck written on it alongside a Steam logo. You can find that [here](https://www.thingiverse.com/thing:7371668).
+- [StonnedModder](https://www.printables.com/model/1760684-openpuck-promicro-nrf52840-case) built a case meant to accomodate a USB C to USB A adapter which you can find [here](https://www.printables.com/model/1760684-openpuck-promicro-nrf52840-case).
+- Another plain case for these pro micros can be found [here](https://www.printables.com/model/1285346-pro-micro-nicenano-nrf52840-dongle-case/collections).
 
 # Future work
 - Find a way to make Xinput mode and mouse work together on all platforms
 - Multi-controller support is now working in Steam/Lizard mode (up to 4 controllers, see the `U` CDC command for a per-slot status dump). Non-puck modes (Xbox, Switch, PS5, DS4) remain single-controller by design — the user can pair one controller and use the appropriate mode.
 - Design the charging portion (and make it short proof)
-- Design a 3D printable housing
 
 # Contributions
 The firmware is split into small, single-responsibility modules under `OpenPuck/` (one file per emulated controller, plus the RF, config, and host-interface layers). Start with [ARCHITECTURE.md](./ARCHITECTURE.md) for the map of how it all fits together and how to add a new USB personality.

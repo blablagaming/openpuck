@@ -97,6 +97,7 @@ static const uint8_t SWPRO_HID_DESC[] = {
 #define JC_BTN_RSTICK (1u << 10)
 #define JC_BTN_LSTICK (1u << 11)
 #define JC_BTN_HOME (1u << 12)
+#define JC_BTN_CAPTURE (1u << 13)
 #define JC_BTN_DOWN (1u << 16)
 #define JC_BTN_UP (1u << 17)
 #define JC_BTN_RIGHT (1u << 18)
@@ -129,6 +130,8 @@ static uint32_t codeToJc(uint8_t c, uint32_t fA, uint32_t fB, uint32_t fX,
 		return JC_BTN_PLUS;
 	case 11:
 		return JC_BTN_HOME;
+	case 18:
+		return JC_BTN_CAPTURE; // Capture / Screenshot (Switch-only target)
 	case 12:
 		return JC_BTN_UP;
 	case 13:
@@ -209,10 +212,8 @@ static void jcPackStick(uint8_t s[3], int16_t x, int16_t y)
 static void jcInputPrefix(uint8_t slot, uint8_t *out)
 {
 	uint32_t b = g_in[slot].buttons;
-	if (g_qamMap && (b & TB_QAM)) {
-		b &= ~(uint32_t)TB_QAM;
-		b |= tritonFromCode(g_qamMap);
-	}
+	// QAM (3 dots) remap -> applied via codeToJc below like a back paddle (so Capture(18)/any target work).
+	bool qam = g_qamMap && (b & TB_QAM);
 	if ((b & CHORD_BACK4) == CHORD_BACK4)
 		b &= ~(uint32_t)(TB_A | TB_B | TB_X | TB_Y);
 	uint32_t fA = g_abSwap ? JC_BTN_B : JC_BTN_A,
@@ -262,6 +263,8 @@ static void jcInputPrefix(uint8_t slot, uint8_t *out)
 		jc |= codeToJc(g_back[2], fA, fB, fX, fY);
 	if (b & TB_R5)
 		jc |= codeToJc(g_back[3], fA, fB, fX, fY);
+	if (qam)
+		jc |= codeToJc(g_qamMap, fA, fB, fX, fY);
 	out[0] = g_jcTimer[slot]++;
 
 	// battery full+charging (hi nibble 0x9), connection_info=1 (lo nibble): a wired/charging Pro Controller.

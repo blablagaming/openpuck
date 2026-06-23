@@ -31,7 +31,7 @@ static const uint8_t SWITCH_HID_DESC[] = {
 static Adafruit_USBD_HID g_switch[NSLOT];
 static unsigned long g_swLastMs[NSLOT] = { 0 };
 
-// back-paddle code (g_back[]) -> Switch button bit. 0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back(Minus) 10=Start(Plus) 11=Guide(Home)
+// back-paddle / QAM code (g_back[], g_qamMap) -> Switch button bit. 0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back(Minus) 10=Start(Plus) 11=Guide(Home) 18=Capture
 static uint16_t codeToSwitch(uint8_t c, uint16_t fA, uint16_t fB, uint16_t fX,
 			     uint16_t fY)
 {
@@ -58,6 +58,8 @@ static uint16_t codeToSwitch(uint8_t c, uint16_t fA, uint16_t fB, uint16_t fX,
 		return 0x200;
 	case 11:
 		return 0x1000;
+	case 18:
+		return 0x2000; // Capture / Screenshot (Switch-only target)
 	default:
 		return 0;
 	}
@@ -81,10 +83,9 @@ static void switchBuildHoripad(uint8_t slot, uint8_t out[8])
 {
 	uint32_t b = g_in[slot].buttons;
 	uint16_t btn = 0;
-	if (g_qamMap && (b & TB_QAM)) {
-		b &= ~(uint32_t)TB_QAM;
-		b |= tritonFromCode(g_qamMap);
-	}
+	// QAM (3 dots) remap: the configured code is applied to the Switch output just like a back paddle below
+	// (so Capture(18) and every Switch target work). 0 = unmapped -> QAM does nothing on Switch.
+	bool qam = g_qamMap && (b & TB_QAM);
 	// Mode-switch chord (all 4 back + A/X/Y): don't pass the face press to the console while the back-4 are held.
 	if ((b & CHORD_BACK4) == CHORD_BACK4)
 		b &= ~(uint32_t)(TB_A | TB_X | TB_Y);
@@ -127,6 +128,8 @@ static void switchBuildHoripad(uint8_t slot, uint8_t out[8])
 		btn |= codeToSwitch(g_back[2], fA, fB, fX, fY);
 	if (b & TB_R5)
 		btn |= codeToSwitch(g_back[3], fA, fB, fX, fY);
+	if (qam)
+		btn |= codeToSwitch(g_qamMap, fA, fB, fX, fY);
 	bool u = b & TB_DUP, d = b & TB_DDN, l = b & TB_DLF,
 	     r = b & TB_DRT; // hat: 0=N..7=NW, 8=neutral
 	if (b & TB_L4)
@@ -137,6 +140,8 @@ static void switchBuildHoripad(uint8_t slot, uint8_t out[8])
 		backCodeToHatDirs(g_back[2], u, d, l, r);
 	if (b & TB_R5)
 		backCodeToHatDirs(g_back[3], u, d, l, r);
+	if (qam)
+		backCodeToHatDirs(g_qamMap, u, d, l, r);
 	uint8_t hat = 8;
 	if (u && r)
 		hat = 1;

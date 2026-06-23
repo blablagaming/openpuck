@@ -106,6 +106,28 @@ _OFF_LSTICK_X, _OFF_LSTICK_Y = 48, 50
 _OFF_RSTICK_X, _OFF_RSTICK_Y = 52, 54
 _OFF_LPAD_P, _OFF_RPAD_P = 56, 58   # u16 trackpad pressure
 
+# ── IMU axis remap: Deck IMU -> SC2 report-0x45 IMU ──────────────────────────
+# The Deck and the SC2 mount their IMUs in different orientations, so the raw Deck axes do NOT line up
+# with the gyro/accel convention Steam expects from an SC2. accel and gyro MUST use the SAME remap (shared
+# handedness) or the host's sensor fusion mixes axes intermittently (see memory: switch-imu-fusion).
+# Each entry = (source_axis, sign): source_axis 0=x 1=y 2=z indexes the raw Deck (x,y,z); sign flips it.
+# CALIBRATE empirically: in Steam's gyro test, rotate the Deck about one physical axis, see which on-screen
+# axis moves and which way, then swap the source / flip the sign here. Default = identity pass-through.
+IMU_GYRO_MAP = ((0, +1), (1, +1), (2, +1))    # -> (gx, gy, gz)
+IMU_ACCEL_MAP = ((0, +1), (1, +1), (2, +1))   # -> (ax, ay, az)
+# Deck->SC2 gyro sensitivity ratio. Both are int16 IMUs at similar full-scale, so 1.0 is the start point;
+# bump if the on-screen rotation is too slow, drop it if too fast/jittery.
+IMU_GYRO_SCALE = 1.0
+
+
+def _clamp16(v):
+    return -32768 if v < -32768 else 32767 if v > 32767 else int(v)
+
+
+def _remap3(src, mapping, scale=1.0):
+    """src = (x, y, z) raw; mapping = 3x (source_axis, sign). Returns the remapped, clamped triple."""
+    return tuple(_clamp16(src[ax] * sign * scale) for ax, sign in mapping)
+
 
 def _s16(b, off):
     return struct.unpack_from("<h", b, off)[0]
@@ -140,13 +162,11 @@ def decode_deck(rpt, state):
     state["rpy"] = _s16(rpt, _OFF_RPAD_Y)
     state["lpp"] = _u16(rpt, _OFF_LPAD_P)   # trackpad pressure (u16)
     state["rpp"] = _u16(rpt, _OFF_RPAD_P)
-    # IMU
-    state["ax"] = _s16(rpt, _OFF_ACCEL)
-    state["ay"] = _s16(rpt, _OFF_ACCEL + 2)
-    state["az"] = _s16(rpt, _OFF_ACCEL + 4)
-    state["gx"] = _s16(rpt, _OFF_GYRO)
-    state["gy"] = _s16(rpt, _OFF_GYRO + 2)
-    state["gz"] = _s16(rpt, _OFF_GYRO + 4)
+    # IMU: raw Deck accel/gyro -> SC2 axes via the shared remap (calibrate IMU_*_MAP in Steam's gyro test).
+    araw = (_s16(rpt, _OFF_ACCEL), _s16(rpt, _OFF_ACCEL + 2), _s16(rpt, _OFF_ACCEL + 4))
+    graw = (_s16(rpt, _OFF_GYRO), _s16(rpt, _OFF_GYRO + 2), _s16(rpt, _OFF_GYRO + 4))
+    state["ax"], state["ay"], state["az"] = _remap3(araw, IMU_ACCEL_MAP)
+    state["gx"], state["gy"], state["gz"] = _remap3(graw, IMU_GYRO_MAP, IMU_GYRO_SCALE)
     return True
 
 

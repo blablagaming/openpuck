@@ -184,6 +184,10 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 	const uint8_t *pl = b + 2;
 	uint16_t pln = (n >= 2) ? n - 2 : 0;
 
+	// Capture EVERY feature SET (the whole cmd channel: 0x83 attr, 0xAE strings, 0xB4 conn, 0xA2/A3 bond, the
+	// feature-1 relay, AND any host battery query) to the WebUSB ring so the panel's capture view shows it.
+	hapLogAdd((uint8_t)slot, cmd, b, n);
+
 	// settings/haptic/LED report (incl. 0x87 lizard-off heartbeat, SDL Triton lizard-disable)
 	if (cmd >= 0x80 && cmd <= 0x89)
 		hostStampAlive();
@@ -195,9 +199,8 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 
 	// report 0x01 = raw passthrough -> queue for RF relay to the controller
 	if (rid == 1 && n >= 2) {
-		// capture EVERY relayed feature-1 command for the WebUSB capture view (haptics, LED SET_LED_COLOR,
-		// 0x87 settings, 0x9F power-off). Log shows cmd as "rid"; bytes start [cmd][len]...
-		hapLogAdd((uint8_t)slot, cmd, b, n);
+		// (feature-1 commands -- haptics, LED, 0x87 settings, 0x9F power-off -- are captured by the
+		// general feature-SET hapLogAdd above.)
 		bool haptic82 = (cmd == 0x82 && len <= pln);
 
 		bool muted = g_resumeMs &&
@@ -321,6 +324,29 @@ static uint16_t handleGet(int slot, uint8_t rid, hid_report_type_t type,
 	if (n > reqlen)
 		n = reqlen;
 	memcpy(buf, S.resp, n);
+	// Battery diagnostic: in gamepad (Steam) mode battery is read host-side via the feature channel, NOT the
+	// forwarded 0x43 (that path is verbatim-identical to lizard mode, where battery works). Capture what Steam
+	// GETs so a WebUSB-panel (or CDC) capture in Steam mode shows the report id it polls for battery (then we
+	// answer it with g_battery in handleSet). De-duped by report id so the high-rate polling doesn't flood the
+	// ring/console -- a freshly-requested id is logged once, then again only after 1s.
+	{
+		static uint8_t lastRid = 0xFF;
+		static unsigned long lastMs = 0;
+		if (rid != lastRid || millis() - lastMs > 1000) {
+			lastRid = rid;
+			lastMs = millis();
+			// ring marker 0xFC = "host feature GET" (panel renders it as "GET rid=.."); payload = what we returned
+			hapLogAdd(0xFC, rid, S.resp, n);
+			if (Serial.availableForWrite() > 80)
+				Serial.printf(
+					"# GET if%d rid=%02X reqlen=%u -> %02X %02X %02X (batt=%u%%)\n",
+					slot, rid, reqlen, S.resp[0], S.resp[1],
+					S.resp[2],
+					(slot >= 0 && slot < NSLOT) ?
+						g_battery[slot] :
+						0);
+		}
+	}
 	return n;
 }
 

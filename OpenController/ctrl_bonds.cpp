@@ -56,3 +56,25 @@ int ctrlBondMatch(const uint8_t *proteus_uuid, const uint8_t *ibex_uuid)
 	}
 	return -1;
 }
+
+int ctrlBondFindOrAlloc(const uint8_t *rec24)
+{
+	// re-writing a known puck (same 8-byte uuid key) updates its slot in place
+	for (int i = 0; i < NBOND; i++)
+		if (g_bond[i].used && memcmp(g_bond[i].rec, rec24, 8) == 0)
+			return i;
+	// otherwise take the first free slot
+	for (int i = 0; i < NBOND; i++)
+		if (!g_bond[i].used)
+			return i;
+	return -1; // bond table full
+}
+
+void ctrlBondClear(int slot)
+{
+	if (slot < 0 || slot >= NBOND)
+		return;
+	g_bond[slot].used = false;
+	memset(g_bond[slot].rec, 0, 24);
+	g_bondDirty = true;
+}

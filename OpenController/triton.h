@@ -74,6 +74,7 @@ struct PuckInput {
 	int16_t lx, ly, rx, ry; // sticks (int16, center 0)
 	uint8_t lt, rt; // triggers scaled 0..255 (trigU8)
 	int16_t lpx, lpy, rpx, rpy; // left / right trackpad coords (int16)
+	uint16_t lpp, rpp; // left / right trackpad pressure (u16)
 	int16_t ax, ay, az; // accelerometer
 	int16_t gx, gy, gz; // gyroscope
 };

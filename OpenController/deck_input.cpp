@@ -30,9 +30,13 @@ static inline uint32_t rd_u32(const uint8_t *p)
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
 	       ((uint32_t)p[3] << 24);
 }
+static inline uint16_t rd_u16(const uint8_t *p)
+{
+	return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
 
-// INPUT payload = buttons u32, lx ly rx ry s16, lt rt u8, lpx lpy rpx rpy s16, ax ay az gx gy gz s16.
-#define DECK_INPUT_LEN 34
+// INPUT payload = buttons u32, lx ly rx ry s16, lt rt u8, lpx lpy rpx rpy s16, lpp rpp u16, IMU 6h.
+#define DECK_INPUT_LEN 38
 static void applyInput(const uint8_t *p, uint8_t n)
 {
 	if (n < DECK_INPUT_LEN)
@@ -48,12 +52,14 @@ static void applyInput(const uint8_t *p, uint8_t n)
 	g_in.lpy = rd_s16(p + 16);
 	g_in.rpx = rd_s16(p + 18);
 	g_in.rpy = rd_s16(p + 20);
-	g_in.ax = rd_s16(p + 22);
-	g_in.ay = rd_s16(p + 24);
-	g_in.az = rd_s16(p + 26);
-	g_in.gx = rd_s16(p + 28);
-	g_in.gy = rd_s16(p + 30);
-	g_in.gz = rd_s16(p + 32);
+	g_in.lpp = rd_u16(p + 22);
+	g_in.rpp = rd_u16(p + 24);
+	g_in.ax = rd_s16(p + 26);
+	g_in.ay = rd_s16(p + 28);
+	g_in.az = rd_s16(p + 30);
+	g_in.gx = rd_s16(p + 32);
+	g_in.gy = rd_s16(p + 34);
+	g_in.gz = rd_s16(p + 36);
 	g_lastInputMs = millis();
 }
 
@@ -66,6 +72,9 @@ static void handleFrame(uint8_t type, const uint8_t *p, uint8_t n)
 	case DECK_T_CONTROL:
 		if (n >= 2 && p[0] == 0x01)
 			g_forwarding = (p[1] != 0);
+		else if (n >= 2 &&
+			 p[0] == 0x02) // clear-bond [slot] (GUI "remove")
+			ctrlBondClear(p[1]);
 		break;
 	case DECK_T_REQ_STATUS:
 		g_lastStatusMs = 0; // force an immediate status emit
@@ -146,29 +155,96 @@ void deckText(const char *s)
 	sendFrame(DECK_T_TEXT, (const uint8_t *)s, (uint8_t)n);
 }
 
-// STATUS payload: [flags][linkSlot][sessCh][nbond] + per-bond [used][alive][puuid4][iuuid4][serial16]
+// Latest relayed haptic, STAGED by deckForwardHaptic (called from the RF poll path) and flushed over CDC
+// by deckHapticTask() at loop level. Staging-then-flushing (a) keeps the CDC write OUT of the RF receive
+// path, and (b) COALESCES a burst to the newest state -- Steam streams rumble at the poll rate, and
+// replaying every frame one-behind is what caused the lag; newest-wins removes the backlog.
+static uint8_t g_hapPayload[8];
+static volatile bool g_hapPending = false;
+static unsigned long g_lastHapMs = 0;
+// cap CDC haptic frames to ~60 Hz: enough for smooth rumble, but no flood of the CDC link / Deck USB.
+#define HAPTIC_MIN_MS 16u
+
+void deckForwardHaptic(uint8_t rid, const uint8_t *d, uint8_t n)
+{
+	// Only while forwarding -- otherwise the Deck isn't grabbed and there's nothing to buzz.
+	if (!g_forwarding)
+		return;
+	uint16_t intensity = 0, left = 0, right = 0;
+	uint8_t lgain = 0, rgain = 0;
+	if (rid == 0x80 && n >= 9) {
+		// SDL Triton rumble report 0x80: [type][intensity u16][left u16][lgain][right u16][rgain].
+		// type 0 = off/zero report (everything stays 0).
+		if (d[0] != 0) {
+			intensity = (uint16_t)(d[1] | (d[2] << 8));
+			left = (uint16_t)(d[3] | (d[4] << 8));
+			lgain = d[5];
+			right = (uint16_t)(d[6] | (d[7] << 8));
+			rgain = d[8];
+		}
+	} else if (rid == 0x82 || rid == 0x8F) {
+		// discrete haptic click/pulse (data ~ [01 01 F7]; trailing byte F7=on, 00=off). The Deck has no
+		// per-pad clicker, so synthesize a short mid-strength buzz on both motors.
+		bool on = (n >= 3) ? (d[2] != 0) : (n >= 1 && d[0] != 0);
+		if (on) {
+			intensity = 0x6000;
+			left = right = 0x6000;
+		}
+	} else {
+		return; // not a haptic the Deck can render
+	}
+	// stage newest (coalesce). The actual sendFrame happens in deckHapticTask, off the RF path.
+	g_hapPayload[0] = (uint8_t)(intensity & 0xFF);
+	g_hapPayload[1] = (uint8_t)(intensity >> 8);
+	g_hapPayload[2] = (uint8_t)(left & 0xFF);
+	g_hapPayload[3] = (uint8_t)(left >> 8);
+	g_hapPayload[4] = (uint8_t)(right & 0xFF);
+	g_hapPayload[5] = (uint8_t)(right >> 8);
+	g_hapPayload[6] = lgain;
+	g_hapPayload[7] = rgain;
+	g_hapPending = true;
+}
+
+void deckHapticTask()
+{
+	if (!g_hapPending)
+		return;
+	if (millis() - g_lastHapMs < HAPTIC_MIN_MS)
+		return; // rate-limit the newest staged haptic to ~60 Hz
+	g_hapPending = false;
+	g_lastHapMs = millis();
+	sendFrame(DECK_T_HAPTIC, g_hapPayload, sizeof g_hapPayload);
+}
+
+// STATUS payload: [flags][linkSlot][sessCh][nbondMax][count] + per USED bond
+//   [slotIdx][alive][puuid4][iuuid4][serial16] (26 B). Only used bonds are sent, so the typical 1-2-puck
+// frame stays small; the slot index lets the GUI target a bond for removal.
 void deckStatusTask()
 {
 	if (millis() - g_lastStatusMs < 250)
 		return;
 	g_lastStatusMs = millis();
 
-	uint8_t p[4 + NBOND * 26];
-	memset(p, 0, sizeof p);
+	uint8_t p[5 + NBOND * 26];
 	bool linkUp = ctrlLinkUp();
 	p[0] = (uint8_t)((g_forwarding ? 1 : 0) | (linkUp ? 2 : 0));
 	p[1] = (g_linkSlot >= 0) ? (uint8_t)g_linkSlot : 0xFF;
 	p[2] = g_sessCh;
 	p[3] = NBOND;
-	uint8_t *q = p + 4;
+	uint8_t count = 0;
+	uint8_t *q = p + 5;
 	for (int i = 0; i < NBOND; i++) {
 		CtrlBond &b = g_bond[i];
-		q[0] = b.used ? 1 : 0;
-		q[1] = (b.used && i == g_linkSlot && linkUp) ? 1 : 0;
+		if (!b.used)
+			continue;
+		q[0] = (uint8_t)i; // firmware slot index (for GUI removal)
+		q[1] = (i == g_linkSlot && linkUp) ? 1 : 0;
 		memcpy(q + 2, b.rec + 0, 4); // proteus_uuid
 		memcpy(q + 6, b.rec + 4, 4); // ibex_uuid
 		memcpy(q + 10, b.rec + 8, 16); // puck serial
 		q += 26;
+		count++;
 	}
-	sendFrame(DECK_T_STATUS, p, sizeof p);
+	p[4] = count;
+	sendFrame(DECK_T_STATUS, p, (uint8_t)(5 + count * 26));
 }

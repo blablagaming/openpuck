@@ -72,6 +72,54 @@ static void writeBond(int slot, const uint8_t *rec24)
 	g_bondDirty = true;
 }
 
+// 0xAE string attribute by index, matching a real controller: 0=board serial, 1=unit serial (both our
+// unique generated values), 3=the Valve constant "7054257d2da7" Steam checks, everything else "NA".
+static const char *aeString(uint8_t idx)
+{
+	return (idx == 0) ? g_board :
+	       (idx == 1) ? g_unit :
+	       (idx == 3) ? "7054257d2da7" :
+			    "NA";
+}
+
+// Build the controller's reply to a feature/command GET as [cmd][len][payload] -- the SAME shape a real
+// controller returns over USB (`83 19 …`, `AE 14 idx …`), confirmed by scmd. The inner length byte IS
+// required (these are command-channel replies, NOT the 0x45 input report). The puck relays this value
+// straight back to Steam as the feature response. ctrl_link wraps it in the F1 type-6 TLV. Returns the
+// byte count written to out (out must hold >= 63).
+uint8_t ctrlFeatureResp(uint8_t cmd, const uint8_t *param, uint8_t plen,
+			uint8_t *out)
+{
+	switch (cmd) {
+	case 0x83: { // product/attribute blob: [0x83][len][ATTR83...]
+		uint8_t alen = ATTR83_LEN > 58 ? 58 : (uint8_t)ATTR83_LEN;
+		out[0] = 0x83;
+		out[1] = alen;
+		memcpy(out + 2, ATTR83, alen);
+		return (uint8_t)(2 + alen);
+	}
+	case 0xAE: { // string attr: [0xAE][0x14][idx][serial 19]
+		uint8_t idx = plen > 0 ? param[0] : 1;
+		const char *s = aeString(idx);
+		out[0] = 0xAE;
+		out[1] = 0x14;
+		out[2] = idx;
+		memset(out + 3, 0, 0x13);
+		memcpy(out + 3, s, strlen(s) < 0x13 ? strlen(s) : 0x13);
+		return (uint8_t)(2 + 0x14);
+	}
+	case 0xB4: // wireless transport state: [0xB4][len=1][state]
+		out[0] = 0xB4;
+		out[1] = 0x01;
+		out[2] = ctrlLinkUp() ? 0x02 : 0x01;
+		return 3;
+	default: // unknown query -> [cmd][len=0]
+		out[0] = cmd;
+		out[1] = 0;
+		return 2;
+	}
+}
+
 // Feature SET: framing [cmd][len][payload...]. rid (1 or 2) is not significant for our commands.
 static void handleSet(uint8_t rid, hid_report_type_t type, uint8_t const *b,
 		      uint16_t n)
@@ -105,11 +153,10 @@ static void handleSet(uint8_t rid, hid_report_type_t type, uint8_t const *b,
 		g_resp_len = 63;
 		break;
 	}
-	case 0xAE: { // string attributes: 0=board, 1=unit serial
+	// string attributes: 0=board, 1=unit serial, 3="7054257d2da7"
+	case 0xAE: {
 		uint8_t idx = pln > 0 ? pl[0] : 1;
-		const char *s = (idx == 0) ? g_board :
-				(idx == 1) ? g_unit :
-					     "NA";
+		const char *s = aeString(idx);
 		g_resp[0] = 0xAE;
 		g_resp[1] = 0x14;
 		g_resp[2] = idx;
@@ -132,7 +179,10 @@ static void handleSet(uint8_t rid, hid_report_type_t type, uint8_t const *b,
 		const uint8_t *rec = pl + k + 1; // skip the NUL
 		uint16_t reclen =
 			(pln > (uint16_t)(k + 1)) ? (uint16_t)(pln - k - 1) : 0;
-		int sk = slotForKey(key);
+		// Find-or-allocate by the record's uuid key rather than the Zephyr settings key, so we can
+		// bond an arbitrary number of pucks (not just the two legacy esb/bond[_2] keys).
+		int sk = (reclen >= 24) ? ctrlBondFindOrAlloc(rec) :
+					  slotForKey(key);
 		if (reclen >= 24)
 			writeBond(sk, rec);
 		if (Serial.availableForWrite() > 40)

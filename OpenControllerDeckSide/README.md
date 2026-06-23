@@ -6,8 +6,21 @@ which relays them over 2.4 GHz to a puck — a real Valve puck **or** an [OpenPu
 puck presents a Steam Controller 2 to whatever host it's plugged into.
 
 ```
-Deck controls ──evdev grab──▶ openctrl.py ──USB-CDC──▶ nRF (28DE:1302) ──RF──▶ puck ──USB──▶ host
+Deck controls ──libusb detach + raw DeckState──▶ openctrl.py ──USB-CDC──▶ nRF (28DE:1302) ──RF──▶ puck ──USB──▶ host
 ```
+
+## Input: USB-level detach (the right way)
+The Deck controller is USB `28DE:1205`; Steam reads its 64-byte "DeckState" report on interface 2.
+You **can't** block Steam by reading `/dev/hidraw3` (it's broadcast), so `openctrl` uses **libusb
+(pyusb)** to **detach the kernel driver from the controller's HID interfaces and read EP `0x83`
+directly** — that genuinely takes the pad away from Steam (so **Steam/QAM forward** instead of opening
+the Deck UI) and decodes the **raw report correctly** (trackpads, sticks, triggers, gyro, all buttons —
+no more trackpad→stick/dpad bleed or Start/Select swap). Stopping forwarding reattaches it to Steam.
+Modeled on `~/Work/joverlay`. (`--evdev` is a lower-fidelity fallback that can't detach at the USB level.)
+
+**Calibrate the report layout for your unit:** `sudo python3 input_source.py` live-dumps the raw
+DeckState and shows which bytes/bits change as you press each control — edit `DECK_BTN_MAP` / the
+analog offsets in `input_source.py` if anything's off.
 
 ## Pieces
 
@@ -15,11 +28,11 @@ Deck controls ──evdev grab──▶ openctrl.py ──USB-CDC──▶ nRF (
 |---|---|
 | `openctrl.py` | Main app: opens the nRF CDC port, shows the touchscreen UI, forwards input. |
 | `ui.py` | Fullscreen pygame UI — a tappable tile per paired puck. |
-| `input_source.py` | Reads the Deck controls (evdev + optional `hid-steam` hidraw for gyro/trackpads). |
+| `input_source.py` | Reads the Deck controls — **libusb DeckSource (detach + raw decode)** + evdev fallback + capture tool. |
 | `frame.py` | The USB-CDC wire protocol (kept in lock-step with `../OpenController/deck_input.*`). |
 | `scpair.py` | Linux hidraw pairing tool (the on-Deck equivalent of `pairtui`). |
-| `run.sh` | `uv` launcher — add this as a non-Steam game. |
-| `setup.sh` | Per-boot `sudo` device-permission grant for the read-only SteamOS rootfs. |
+| `run.sh` | `uv` launcher (`pyserial`+`pygame`+`pyusb`) — add this as a non-Steam game. |
+| `setup.sh` | Per-boot `sudo`: opens `/dev/ttyACM*` + the controller's usbfs node (read-only SteamOS). |
 
 ## Run with `uv` (no system install, read-only SteamOS friendly)
 

@@ -17,11 +17,13 @@ T_REQ_STATUS = 0x03
 # nRF -> Deck
 T_STATUS = 0x10
 T_TEXT = 0x1F
+# nRF -> Deck haptic: [intensity u16][left u16][right u16][lgain u8][rgain u8] (Deck rumble cmd 0xEB)
+T_HAPTIC = 0x11
 
-# INPUT payload: buttons u32, lx ly rx ry s16, lt rt u8, lpx lpy rpx rpy s16, ax ay az gx gy gz s16.
-# 4 + 8 + 2 + 8 + 12 = 34 bytes, little-endian. Matches applyInput() in deck_input.cpp.
-_INPUT = struct.Struct("<I4hBB4h6h")
-INPUT_LEN = _INPUT.size  # 34
+# INPUT payload: buttons u32, lx ly rx ry s16, lt rt u8, lpx lpy rpx rpy s16, lpp rpp u16, axyz/gxyz s16.
+# 4 + 8 + 2 + 8 + 4 + 12 = 38 bytes, little-endian. Matches applyInput() in deck_input.cpp.
+_INPUT = struct.Struct("<I4hBB4hHH6h")
+INPUT_LEN = _INPUT.size  # 38
 
 
 def _sum8(type_, payload):
@@ -45,13 +47,29 @@ def build_input(st):
         g("lx", 0), g("ly", 0), g("rx", 0), g("ry", 0),
         g("lt", 0) & 0xFF, g("rt", 0) & 0xFF,
         g("lpx", 0), g("lpy", 0), g("rpx", 0), g("rpy", 0),
+        g("lpp", 0) & 0xFFFF, g("rpp", 0) & 0xFFFF,
         g("ax", 0), g("ay", 0), g("az", 0), g("gx", 0), g("gy", 0), g("gz", 0),
     )
     return build(T_INPUT, payload)
 
 
+def parse_haptic(payload):
+    """Decode a T_HAPTIC payload -> dict for the Deck rumble cmd. Mirrors deck_input.cpp."""
+    if len(payload) < 8:
+        return None
+    intensity, left, right = struct.unpack_from("<HHH", payload, 0)
+    lgain, rgain = payload[6], payload[7]
+    return {"intensity": intensity, "left": left, "right": right,
+            "lgain": lgain, "rgain": rgain}
+
+
 def build_set_forwarding(on):
     return build(T_CONTROL, bytes([0x01, 1 if on else 0]))
+
+
+def build_clear_bond(slot):
+    """Tell the firmware to un-bond (remove) slot `slot` -- the GUI "remove" affordance."""
+    return build(T_CONTROL, bytes([0x02, slot & 0xFF]))
 
 
 def build_req_status():
@@ -59,21 +77,22 @@ def build_req_status():
 
 
 def parse_status(payload):
-    """Decode a T_STATUS payload into a dict. Mirrors deckStatusTask() in deck_input.cpp."""
-    if len(payload) < 4:
+    """Decode a T_STATUS payload into a dict. Mirrors deckStatusTask() in deck_input.cpp.
+    Only USED bonds are sent; each carries its firmware slot index (for removal)."""
+    if len(payload) < 5:
         return None
-    flags, link_slot, sess_ch, nbond = payload[0], payload[1], payload[2], payload[3]
+    flags, link_slot, sess_ch, nbond_max, count = payload[:5]
     bonds = []
-    off = 4
-    for _ in range(nbond):
+    off = 5
+    for _ in range(count):
         if off + 26 > len(payload):
             break
-        used = payload[off]
+        slot = payload[off]
         alive = payload[off + 1]
         puuid = struct.unpack_from("<I", payload, off + 2)[0]
         iuuid = struct.unpack_from("<I", payload, off + 6)[0]
         serial = payload[off + 10:off + 26].split(b"\x00")[0].decode("latin1", "replace")
-        bonds.append({"used": bool(used), "alive": bool(alive),
+        bonds.append({"slot": slot, "used": True, "alive": bool(alive),
                       "puuid": puuid, "iuuid": iuuid, "serial": serial})
         off += 26
     return {
@@ -81,6 +100,7 @@ def parse_status(payload):
         "link_up": bool(flags & 2),
         "link_slot": None if link_slot == 0xFF else link_slot,
         "sess_ch": sess_ch,
+        "nbond_max": nbond_max,
         "bonds": bonds,
     }
 

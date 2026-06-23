@@ -38,11 +38,13 @@ void buildReport45(uint8_t *out, uint8_t seq)
 	put_s16(out, 12, g_in.rx);
 	put_s16(out, 14, g_in.ry);
 
-	// trackpads: lpx@16 lpy@18 rpx@22 rpy@24 (offsets 20/26 unused by the decode)
+	// trackpads: LPad x@16 y@18 pressure@20, RPad x@22 y@24 pressure@26 (per PROTOCOL.md report 0x45)
 	put_s16(out, 16, g_in.lpx);
 	put_s16(out, 18, g_in.lpy);
+	put_u16(out, 20, g_in.lpp);
 	put_s16(out, 22, g_in.rpx);
 	put_s16(out, 24, g_in.rpy);
+	put_u16(out, 26, g_in.rpp);
 
 	// IMU: accel @0x22 (offset 32), gyro @0x28 (offset 38) -- inverse of imuFrom45
 	put_s16(out, 32, g_in.ax);

@@ -10,11 +10,13 @@ link, and control returns to the Deck.
     python3 openctrl.py                 # fullscreen touchscreen UI
     python3 openctrl.py --debug         # headless: print status, no UI (for bring-up)
     python3 openctrl.py --port /dev/ttyACM0   # override CDC port autodetect
-    python3 openctrl.py --hidraw        # also read gyro/trackpads from the Deck hidraw (see input_source)
+    python3 openctrl.py --evdev         # use the evdev fallback input source (lower fidelity)
 
-Deps: pyserial (required), evdev (for input), pygame (for the UI). See README.md.
+The dongle (nRF CDC) is hot-pluggable: launch with or without it, it appears/disappears live.
+Deps: pyserial + pygame (UI) + pyusb (input/USB detach). See README.md / run.sh.
 """
 import argparse
+import os
 import sys
 import time
 
@@ -45,16 +47,16 @@ class App:
     def __init__(self, args):
         self.args = args
         import serial  # imported here so --help works without pyserial
-        port = args.port or find_port()
-        if not port:
-            raise SystemExit("OpenController CDC port not found (Valve 28DE:1302). "
-                             "Plug in the nRF, or pass --port.")
-        self.port_name = port
-        self.ser = serial.Serial(port, 115200, timeout=0)
+        self._serial = serial
+
+        # The dongle (nRF CDC) is HOT-PLUGGABLE: we don't require it at launch and we re-open it
+        # whenever it (re)appears, and tear down cleanly when it goes away.
+        self.ser = None
+        self.port_name = None
         self.reader = frame.Reader()
+        self._last_open_try = 0.0
 
         self.input = None
-        self.hidraw = None
         self.forwarding = False
         self.fwd_slot = None
         self.last_input = 0.0
@@ -62,44 +64,128 @@ class App:
         # model surfaced to the UI
         self.status = {"link_up": False, "link_slot": None, "sess_ch": 0,
                        "bonds": [], "forwarding": False}
-        self.note = "connected to %s" % port
+        self.note = "waiting for OpenController dongle (28DE:1302)…"
         self.log = []  # firmware '#' diagnostic lines (the in-app serial monitor)
 
-    # ---- serial I/O ----
+        # file log: everything (firmware '#' lines + app events) with timestamps, for sharing.
+        self.logf = None
+        try:
+            self.logf = open(args.logfile, "a", buffering=1)  # line-buffered
+            self._flog("==== openctrl start ====")
+        except Exception as ex:
+            print("logfile open failed (%s); continuing without it" % ex)
+
+    def _flog(self, line):
+        if self.logf:
+            try:
+                self.logf.write("%.3f %s\n" % (time.monotonic(), line))
+            except Exception:
+                pass
+
+    @property
+    def dongle_connected(self):
+        return self.ser is not None
+
+    # ---- serial I/O (hot-plug aware) ----
+    def _open_serial(self):
+        """Try to (re)open the dongle CDC port. Throttled to ~2 Hz. Sets self.ser on success."""
+        if self.ser is not None:
+            return
+        now = time.monotonic()
+        if now - self._last_open_try < 0.5:
+            return
+        self._last_open_try = now
+        port = self.args.port or find_port()
+        if not port:
+            return
+        try:
+            self.ser = self._serial.Serial(port, 115200, timeout=0)
+            self.port_name = port
+            self.reader = frame.Reader()  # fresh framer for the new connection
+            # forget any stale link state from a previous dongle session
+            self.status = {"link_up": False, "link_slot": None, "sess_ch": 0,
+                           "bonds": [], "forwarding": False}
+            self.note = "dongle connected: %s" % port
+            self._flog("dongle connected: %s" % port)
+        except Exception:
+            self.ser = None  # e.g. permission / busy; will retry
+
+    def _drop_serial(self, why):
+        """Tear down on disconnect: stop forwarding, close the port, reset the model."""
+        if self.forwarding:
+            self.stop_forwarding()
+        try:
+            if self.ser:
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
+        self.port_name = None
+        self.status = {"link_up": False, "link_slot": None, "sess_ch": 0,
+                       "bonds": [], "forwarding": False}
+        self.note = "dongle disconnected (%s) — waiting…" % why
+        self._flog("dongle disconnected: %s" % why)
+
     def pump_serial(self):
+        if self.ser is None:
+            self._open_serial()
+            return
+        # A yanked CDC often makes pyserial return b'' silently rather than raise, so the port node
+        # disappearing is the reliable disconnect signal. Check it (throttled).
+        now = time.monotonic()
+        if now - self._last_open_try >= 0.5:
+            self._last_open_try = now
+            if self.port_name and not os.path.exists(self.port_name):
+                self._drop_serial("unplugged")
+                return
         try:
             data = self.ser.read(512)
-        except Exception:
-            data = b""
+        except Exception as ex:
+            # device yanked / I/O error -> clean teardown, then we'll re-detect it
+            self._drop_serial(str(ex) or "read error")
+            return
+        last_haptic = None
         for typ, payload in self.reader.feed(data):
             if typ == frame.T_STATUS:
                 st = frame.parse_status(payload)
                 if st:
                     self.status = st
+            elif typ == frame.T_HAPTIC:
+                # coalesce a burst to the newest state -- replaying every frame is what lagged the rumble
+                last_haptic = frame.parse_haptic(payload)
             elif typ == frame.T_TEXT:
                 line = payload.decode("latin1", "replace").rstrip()
                 if line:
                     self.note = line
                     self.log.append(line)
                     self.log = self.log[-300:]
+                    self._flog(line)
                     if self.args.debug:
                         print(line)  # stream the firmware log like a serial monitor
+        # play only the newest haptic of this batch, and only while we're actually forwarding
+        if last_haptic and self.forwarding and self.input:
+            try:
+                self.input.rumble(last_haptic["intensity"], last_haptic["left"],
+                                  last_haptic["right"], last_haptic["lgain"],
+                                  last_haptic["rgain"])
+            except Exception:
+                pass
 
     def send(self, b):
+        if self.ser is None:
+            return
         try:
             self.ser.write(b)
         except Exception:
-            pass
+            self._drop_serial("write error")
 
     # ---- forwarding control ----
     def _ensure_input(self):
         if self.input is None:
-            self.input = isrc.EvdevSource(path=self.args.input)
-            if self.args.hidraw:
-                try:
-                    self.hidraw = isrc.HidrawImu()
-                except Exception:
-                    self.hidraw = None
+            # libusb DeckSource by default (detaches the pad from Steam + decodes the raw report
+            # correctly); --evdev forces the lower-fidelity fallback.
+            self.input = isrc.open_source(prefer_evdev=self.args.evdev,
+                                          path=self.args.input)
         return self.input
 
     def start_forwarding(self, slot):
@@ -112,6 +198,7 @@ class App:
         self.fwd_slot = slot
         self.send(frame.build_set_forwarding(True))
         self.note = "forwarding -> slot %s (%s)" % (slot, self.input.name)
+        self._flog("APP forwarding START slot=%s input=%s" % (slot, self.input.name))
 
     def stop_forwarding(self):
         self.forwarding = False
@@ -120,20 +207,28 @@ class App:
         if self.input:
             self.input.ungrab()
         self.note = "control returned to Deck"
+        self._flog("APP forwarding STOP")
 
     def toggle(self, slot):
         """Tap handler: a tappable tile is one whose puck is live (alive)."""
         if self.forwarding:
             self.stop_forwarding()
-        else:
+        elif self.dongle_connected:
             self.start_forwarding(slot)
+
+    def remove_bond(self, slot):
+        """GUI "remove": un-bond a puck slot on the firmware. Refused while forwarding to it."""
+        if self.forwarding and self.fwd_slot == slot:
+            return
+        self.send(frame.build_clear_bond(slot))
+        # drop it from the local model immediately so the tile disappears without waiting for STATUS
+        self.status["bonds"] = [b for b in self.status.get("bonds", []) if b["slot"] != slot]
+        self._flog("APP remove bond slot=%s" % slot)
 
     def pump_input(self):
         if not self.forwarding or not self.input:
             return
         st = self.input.pump()
-        if self.hidraw:
-            self.hidraw.read_into(st)
         now = time.monotonic()
         if now - self.last_input >= 1.0 / INPUT_HZ:
             self.last_input = now
@@ -145,7 +240,7 @@ class App:
             # only release if the slot we're forwarding to is no longer alive
             slot = self.fwd_slot
             bonds = self.status.get("bonds", [])
-            alive = slot is not None and slot < len(bonds) and bonds[slot]["alive"]
+            alive = any(b["slot"] == slot and b["alive"] for b in bonds)
             if not alive:
                 self.stop_forwarding()
 
@@ -160,10 +255,11 @@ class App:
                 last = time.monotonic()
                 s = self.status
                 tiles = ", ".join(
-                    "[%d %s%s]" % (i, b["serial"] or "?", " LIVE" if b["alive"] else "")
-                    for i, b in enumerate(s["bonds"]) if b["used"]) or "(no bonds)"
-                print("link=%s fwd=%s ch=%s %s | %s" %
-                      (s["link_up"], self.forwarding, s["sess_ch"], tiles, self.note))
+                    "[%d %s%s]" % (b["slot"], b["serial"] or "?", " LIVE" if b["alive"] else "")
+                    for b in s["bonds"]) or "(no bonds)"
+                print("dongle=%s link=%s fwd=%s ch=%s %s | %s" %
+                      ("yes" if self.dongle_connected else "NO", s["link_up"],
+                       self.forwarding, s["sess_ch"], tiles, self.note))
             time.sleep(0.002)
 
     def run_ui(self):
@@ -174,10 +270,13 @@ class App:
 def main():
     ap = argparse.ArgumentParser(description="Steam Deck forwarder for OpenController")
     ap.add_argument("--port", help="CDC port (default: autodetect Valve 28DE:1302)")
-    ap.add_argument("--input", help="force the Deck controller evdev node, e.g. /dev/input/event12 "
-                    "(default: prefer the physical 28de:1205 controller)")
+    ap.add_argument("--input", help="force an evdev node, e.g. /dev/input/event12 (only with --evdev)")
+    ap.add_argument("--evdev", action="store_true",
+                    help="use the evdev fallback instead of the libusb DeckSource (lower fidelity, "
+                    "no USB-level detach)")
     ap.add_argument("--debug", action="store_true", help="headless status print, no UI")
-    ap.add_argument("--hidraw", action="store_true", help="also read gyro/trackpads via hid-steam hidraw")
+    ap.add_argument("--logfile", default="openctrl.log",
+                    help="append firmware log + app events here (default: openctrl.log in this dir)")
     args = ap.parse_args()
     app = App(args)
     try:

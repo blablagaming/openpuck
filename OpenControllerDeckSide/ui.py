@@ -36,32 +36,45 @@ def run(app):
     f_small = _font(int(H * 0.022))
 
     tile_rects = []  # (rect, slot, tappable)
+    del_rects = []   # (rect, slot) -- the per-tile "remove bond" ✕ target
 
     def draw():
-        nonlocal tile_rects
+        nonlocal tile_rects, del_rects
         screen.fill(BG)
         s = app.status
-        # title bar
-        screen.blit(f_title.render("⬡  OpenController", True, ACCENT), (40, 28))
-        link = "● linked  ch%d" % s["sess_ch"] if s["link_up"] else "○ searching…"
-        col = LIVE if s["link_up"] else DIM
-        t = f_med.render(link, True, col)
-        screen.blit(t, (W - t.get_width() - 40, 38))
+        connected = app.dongle_connected
+        # compact status line (no big title banner): dongle presence first, then RF link
+        if not connected:
+            badge, col = "⨯ no dongle", WARN
+        elif s["link_up"]:
+            badge, col = "● linked  ch%d" % s["sess_ch"], LIVE
+        else:
+            badge, col = "○ searching…", DIM
+        t = f_med.render(badge, True, col)
+        screen.blit(t, (W - t.get_width() - 40, 24))
 
-        # tiles
+        # tiles -- live pucks float to the top, then by slot index
         tile_rects = []
-        bonds = [(i, b) for i, b in enumerate(s["bonds"]) if b["used"]]
+        del_rects = []
+        bonds = sorted(s["bonds"], key=lambda b: (not b["alive"], b["slot"]))
         top = int(H * 0.16)
         gap = int(H * 0.025)
         th = int((H * 0.42 - gap * max(0, len(bonds) - 1)) / max(1, len(bonds)))
         th = min(th, int(H * 0.20))
-        if not bonds:
+        if not connected:
+            msg = f_big.render("Plug in the OpenController dongle", True, WARN)
+            screen.blit(msg, (W // 2 - msg.get_width() // 2, H // 2 - 40))
+            sub = f_small.render("Waiting for the nRF (Valve 28DE:1302) on USB… it'll appear here automatically.",
+                                 True, DIM)
+            screen.blit(sub, (W // 2 - sub.get_width() // 2, H // 2 + 20))
+        elif not bonds:
             msg = f_big.render("No paired pucks", True, DIM)
             screen.blit(msg, (W // 2 - msg.get_width() // 2, H // 2 - 40))
             sub = f_small.render("Pair on a computer with Steam or PairTUI (scpair.py), then plug the puck into your host.",
                                  True, DIM)
             screen.blit(sub, (W // 2 - sub.get_width() // 2, H // 2 + 20))
-        for n, (slot, b) in enumerate(bonds):
+        for n, b in enumerate(bonds):
+            slot = b["slot"]
             y = top + n * (th + gap)
             rect = pygame.Rect(40, y, W - 80, th)
             sel = app.forwarding and app.fwd_slot == slot
@@ -82,6 +95,16 @@ def run(app):
             screen.blit(f_small.render("slot %d · %s" % (slot, state), True, DIM),
                         (rect.x + 90, rect.y + th - 38))
             tile_rects.append((rect, slot, tappable or sel))
+            # remove-bond ✕ on the far right (only when idle -- can't un-bond while forwarding)
+            if not app.forwarding:
+                dsz = min(th - 24, 64)
+                drect = pygame.Rect(rect.right - dsz - 18, rect.y + (th - dsz) // 2, dsz, dsz)
+                pygame.draw.rect(screen, TILE, drect, border_radius=12)
+                pygame.draw.rect(screen, STOP, drect, width=2, border_radius=12)
+                x = f_big.render("✕", True, STOP)
+                screen.blit(x, (drect.centerx - x.get_width() // 2,
+                                drect.centery - x.get_height() // 2))
+                del_rects.append((drect, slot))
 
         # firmware log panel (the in-app serial monitor) — fills the area below the tiles
         log_top = int(H * 0.60)
@@ -113,6 +136,11 @@ def run(app):
         if app.forwarding:
             app.stop_forwarding()
             return
+        # the remove-bond ✕ takes priority over the tile body it sits on
+        for drect, slot in del_rects:
+            if drect.collidepoint(pos):
+                app.remove_bond(slot)
+                return
         for rect, slot, tappable in tile_rects:
             if rect.collidepoint(pos) and tappable:
                 app.toggle(slot)

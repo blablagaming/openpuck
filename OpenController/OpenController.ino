@@ -79,4 +79,6 @@ void loop()
 	ctrlLinkTask();
 	// report bond + link state back to the Deck UI
 	deckStatusTask();
+	// flush the newest relayed haptic to the Deck (rate-limited, off the RF path)
+	deckHapticTask();
 }

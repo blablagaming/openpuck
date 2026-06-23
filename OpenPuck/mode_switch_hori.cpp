@@ -2,6 +2,8 @@
 #include "triton.h"
 #include "gamepad_util.h"
 #include "config.h"
+#include "bonds.h"
+#include "usb_mount.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 
@@ -26,10 +28,11 @@ static const uint8_t SWITCH_HID_DESC[] = {
 	// vendor (output, 8 bytes; unused)
 	0x0A, 0x21, 0x26, 0x95, 0x08, 0x91, 0x02, 0xC0
 };
-static Adafruit_USBD_HID g_switch; // HORIPAD gamepad HID interface
-static unsigned long g_swLastMs = 0;
+// NSLOT HORIPAD HID instances -- one per bond slot. The Switch console binds each as a separate gamepad.
+static Adafruit_USBD_HID g_switch[NSLOT];
+static unsigned long g_swLastMs[NSLOT] = { 0 };
 
-// back-paddle code (g_back[]) -> Switch button bit. 0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back(Minus) 10=Start(Plus) 11=Guide(Home)
+// back-paddle / QAM code (g_back[], g_qamMap) -> Switch button bit. 0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back(Minus) 10=Start(Plus) 11=Guide(Home) 18=Capture
 static uint16_t codeToSwitch(uint8_t c, uint16_t fA, uint16_t fB, uint16_t fX,
 			     uint16_t fY)
 {
@@ -56,6 +59,12 @@ static uint16_t codeToSwitch(uint8_t c, uint16_t fA, uint16_t fB, uint16_t fX,
 		return 0x200;
 	case 11:
 		return 0x1000;
+	case 18:
+		return 0x2000; // Capture / Screenshot (Switch-only target)
+	case 19:
+		return 0x40; // ZL (left trigger)
+	case 20:
+		return 0x80; // ZR (right trigger)
 	default:
 		return 0;
 	}
@@ -74,14 +83,14 @@ static inline void backCodeToHatDirs(uint8_t c, bool &u, bool &d, bool &l,
 		r = true;
 }
 // HORIPAD/Switch button bits: Y=1 B=2 A=4 X=8 L=10 R=20 ZL=40 ZR=80 Minus=100 Plus=200 LClick=400 RClick=800 Home=1000 Capture=2000
-static void switchBuildHoripad(uint8_t out[8])
+// Per-slot: each controller's decoded input is in g_in[slot].
+static void switchBuildHoripad(uint8_t slot, uint8_t out[8])
 {
-	uint32_t b = g_in.buttons;
+	uint32_t b = g_in[slot].buttons;
 	uint16_t btn = 0;
-	if (g_qamMap && (b & TB_QAM)) {
-		b &= ~(uint32_t)TB_QAM;
-		b |= tritonFromCode(g_qamMap);
-	}
+	// QAM (3 dots) remap: the configured code is applied to the Switch output just like a back paddle below
+	// (so Capture(18) and every Switch target work). 0 = unmapped -> QAM does nothing on Switch.
+	bool qam = g_qamMap && (b & TB_QAM);
 	// Mode-switch chord (all 4 back + A/X/Y): don't pass the face press to the console while the back-4 are held.
 	if ((b & CHORD_BACK4) == CHORD_BACK4)
 		b &= ~(uint32_t)(TB_A | TB_X | TB_Y);
@@ -101,9 +110,9 @@ static void switchBuildHoripad(uint8_t out[8])
 	if (b & TB_RB)
 		btn |= 0x20; // L, R
 	// ZL/ZR digital: trip on the analog threshold (activates early) OR the full-press click bit
-	if ((g_in.lt >= SW_TRIG_ON) || (b & 0x8000000u))
+	if ((g_in[slot].lt >= SW_TRIG_ON) || (b & 0x8000000u))
 		btn |= 0x40;
-	if ((g_in.rt >= SW_TRIG_ON) || (b & 0x800000u))
+	if ((g_in[slot].rt >= SW_TRIG_ON) || (b & 0x800000u))
 		btn |= 0x80;
 	if (b & TB_MENU)
 		btn |= 0x100;
@@ -124,6 +133,8 @@ static void switchBuildHoripad(uint8_t out[8])
 		btn |= codeToSwitch(g_back[2], fA, fB, fX, fY);
 	if (b & TB_R5)
 		btn |= codeToSwitch(g_back[3], fA, fB, fX, fY);
+	if (qam)
+		btn |= codeToSwitch(g_qamMap, fA, fB, fX, fY);
 	bool u = b & TB_DUP, d = b & TB_DDN, l = b & TB_DLF,
 	     r = b & TB_DRT; // hat: 0=N..7=NW, 8=neutral
 	if (b & TB_L4)
@@ -134,6 +145,8 @@ static void switchBuildHoripad(uint8_t out[8])
 		backCodeToHatDirs(g_back[2], u, d, l, r);
 	if (b & TB_R5)
 		backCodeToHatDirs(g_back[3], u, d, l, r);
+	if (qam)
+		backCodeToHatDirs(g_qamMap, u, d, l, r);
 	uint8_t hat = 8;
 	if (u && r)
 		hat = 1;
@@ -154,36 +167,63 @@ static void switchBuildHoripad(uint8_t out[8])
 	out[0] = btn & 0xFF;
 	out[1] = btn >> 8;
 	out[2] = hat;
-	out[3] = swStick(g_in.lx, false);
-	out[4] = swStick(g_in.ly, true); // HID Y is down-positive -> invert
-	out[5] = swStick(g_in.rx, false);
-	out[6] = swStick(g_in.ry, true);
+	out[3] = swStick(g_in[slot].lx, false);
+	out[4] = swStick(g_in[slot].ly,
+			 true); // HID Y is down-positive -> invert
+	out[5] = swStick(g_in[slot].rx, false);
+	out[6] = swStick(g_in[slot].ry, true);
 	out[7] = 0;
 }
 
+// Dynamic-mount mode: begin() is unused (setup() calls beginPool()+usbReenumerate instead).
 void SwitchHoriController::begin()
 {
+}
+// Wake mouse (1 HID) is present in Switch mode, leaving CFG_TUD_HID-1 for the HORIPAD pool.
+uint8_t SwitchHoriController::maxSlots() const
+{
+	uint8_t cap = (uint8_t)(CFG_TUD_HID - 1);
+	return cap < NSLOT ? cap : (uint8_t)NSLOT;
+}
+void SwitchHoriController::usbIdentity()
+{
 	USBDevice.setID(0x0F0D, 0x0092);
-
-	// Windows caches config by VID:PID:bcdDevice, so any interface change MUST bump this
-	USBDevice.setDeviceVersion(0x0202);
+	USBDevice.setDeviceVersion(0x0210);
 	USBDevice.setManufacturerDescriptor("HORI CO.,LTD.");
 	USBDevice.setProductDescriptor("POKKEN CONTROLLER");
-	g_switch.enableOutEndpoint(true);
-	g_switch.setReportDescriptor(SWITCH_HID_DESC, sizeof SWITCH_HID_DESC);
-
-	// 1ms bInterval so the RF rate is the only latency limit (matches Xbox)
-	g_switch.setPollInterval(1);
-	g_switch.begin();
+}
+void SwitchHoriController::beginPool()
+{
+	uint8_t pool = maxSlots();
+	for (uint8_t s = 0; s < pool; s++) {
+		g_switch[s].enableOutEndpoint(true);
+		g_switch[s].setReportDescriptor(SWITCH_HID_DESC,
+						sizeof SWITCH_HID_DESC);
+		g_switch[s].setPollInterval(1);
+		g_switch[s].begin();
+	}
+}
+void SwitchHoriController::mountSlots(uint8_t k)
+{
+	for (uint8_t u = 0; u < k; u++)
+		USBDevice.addInterface(g_switch[u]);
 }
 void SwitchHoriController::task()
-{ // stream the 8-byte HORIPAD report at ~250Hz (no handshake needed)
-	if (!g_switch.ready())
-		return;
-	if (millis() - g_swLastMs < USB_STREAM_MS)
-		return;
-	g_swLastMs = millis();
-	uint8_t p[8];
-	switchBuildHoripad(p);
-	g_switch.sendReport(0, p, sizeof p); // report-id-less descriptor
+{
+	// stream the 8-byte HORIPAD report at ~250Hz per CONNECTED controller. usbSlot u -> bond slot for input;
+	// switchBuildHoripad reads g_in[bond] (no per-USB-slot state in the HORIPAD report).
+	for (uint8_t u = 0; u < g_usbMountCount; u++) {
+		if (!g_switch[u].ready())
+			continue;
+		if (millis() - g_swLastMs[u] < USB_STREAM_MS)
+			continue;
+		int bond = g_usbToBond[u];
+		if (bond < 0)
+			continue;
+		g_swLastMs[u] = millis();
+		uint8_t p[8];
+		switchBuildHoripad((uint8_t)bond, p);
+		g_switch[u].sendReport(0, p,
+				       sizeof p); // report-id-less descriptor
+	}
 }

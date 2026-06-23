@@ -11,6 +11,20 @@
 // int16 stick (center 0) -> uint8 (center 0x80), optional axis invert (HID Y is down-positive).
 uint8_t swStick(int16_t v, bool invert);
 
+// Write a signed 16-bit value little-endian.
+static inline void le16(uint8_t *p, int16_t v)
+{
+	p[0] = (uint8_t)(v & 0xFF);
+	p[1] = (uint8_t)((v >> 8) & 0xFF);
+}
+
+// Fill a DS4/DualSense motion-calibration feature report PAYLOAD. The TinyUSB GET_REPORT path already wrote the
+// report id and hands us the buffer PAST it, so our offsets = the kernel's buf[] index minus one (bias at 0..5,
+// stays zero from the caller's memset). Zero bias + symmetric non-zero ranges so hid-playstation's/hid-sony's
+// divisor (|plus-bias|+|minus-bias|, and gyro speed_plus+speed_minus) is never zero. Shared by report 0x02 (DS4)
+// and 0x05 (DualSense) -- identical layout; the caller returns size-1 and leaves trailing bytes zero.
+void psNeutralCalib(uint8_t *buf);
+
 // Steam trackpad s16 coords -> absolute touch surface. TOUCH_PAD_W is split into left/right halves so both
 // pads can co-exist as two contacts on a single DualSense/DS4 touchpad.
 #define TOUCH_PAD_W 1920u
@@ -64,6 +78,10 @@ static inline uint32_t tritonFromCode(uint8_t c)
 		return TB_TOUCH;
 	case 17:
 		return TB_MUTE;
+	case 19:
+		return TB_L2; // left trigger (LT / L2 / ZL)
+	case 20:
+		return TB_R2; // right trigger (RT / R2 / ZR)
 	default:
 		return 0;
 	}
@@ -72,6 +90,8 @@ static inline uint32_t tritonFromCode(uint8_t c)
 // PlayStation-layout button packing (shared by mode_ps5 + mode_hidgyro).
 uint32_t psButtonsFromSteam(
 	uint32_t raw); // apply back-paddle + chord-guard + QAM remapping
-uint8_t psShouldersByte(uint32_t b); // L1..R3 + Create/Options byte
+// L1..R3 + Create/Options byte. lt/rt are the per-slot analog trigger values so the digital ZL/ZR trip
+// doesn't leak across slots when several slots are active.
+uint8_t psShouldersByte(uint32_t b, uint8_t lt, uint8_t rt);
 uint8_t psHatNibble(uint32_t b); // d-pad -> 8-way hat (8 = neutral)
 uint8_t psFaceNibble(uint32_t b); // face buttons (with A/B + X/Y swap)

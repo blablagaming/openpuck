@@ -37,3 +37,8 @@ bool wakeHidMove(int8_t dx, int8_t dy)
 	// boot mouse descriptor has no report ID -> report_id 0; buttons=0 so we move but never click
 	return g_wakeHid.mouseReport(0, 0, dx, dy, 0, 0);
 }
+
+void wakeHidAddInterface()
+{
+	TinyUSBDevice.addInterface(g_wakeHid);
+}

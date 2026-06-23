@@ -30,14 +30,19 @@
 #define TB_LB 0x80000u
 #define TB_RPADT 0x200000u
 #define TB_RPADC 0x400000u
-
-// virtual: PS Touch Click (back-paddle/QAM target, not a real Triton button)
-#define TB_TOUCH 0x100000u
-
-// virtual: PS5 Mute button (back-paddle/QAM target, not a real Triton button)
-#define TB_MUTE 0x1000000u
 #define TB_LPADT 0x2000000u
 #define TB_LPADC 0x4000000u
+// Trigger full-pull / click bits (the controller sets these at a full ZL/ZR pull; also the target of a back-
+// paddle / QAM remap to LT/RT). psShouldersByte / the Switch builders already read these as L2/R2 / ZL/ZR.
+#define TB_R2 0x800000u
+#define TB_L2 0x8000000u
+
+// Virtual PS targets, settable ONLY via a back-paddle/QAM remap (psOrBackCode / tritonFromCode), never by the
+// controller itself. They live on bits 30/31 -- the only bits the SC2 0x45 report does NOT use (see PROTOCOL.md
+// §8.1; bits 0..29 are all real). They originally aliased 0x00100000 (right stick touch) and 0x01000000 (left
+// stick touch), so merely RESTING a thumb on a capacitive stick fired the DualSense trackpad-click / mute.
+#define TB_TOUCH 0x40000000u // PS touchpad click
+#define TB_MUTE 0x80000000u // PS5 mute
 
 // all four back paddles held -> mode-switch chord guard
 #define CHORD_BACK4 (TB_R4 | TB_L4 | TB_R5 | TB_L5)
@@ -72,6 +77,9 @@ void imuFrom45(const uint8_t *r, int16_t *ax, int16_t *ay, int16_t *az,
 	       int16_t *gx, int16_t *gy, int16_t *gz);
 
 // ---- shared decoded input (filled by rf_link.cpp once per fresh report 0x45, read by every mode) ----
+// One PuckInput per bond slot: each controller in a multi-slot puck has its own decoded input. The stream
+// modes (Switch, PS5, DS4) read g_in[s] for each active slot in their task() loop; the puck/lizard mode reads
+// g_in[slot] inside onReport45/onAuxReport to forward to hid[slot].
 struct PuckInput {
 	// raw Triton buttons (TB_*); per-mode builders apply their own chord masking
 	uint32_t buttons;
@@ -81,4 +89,5 @@ struct PuckInput {
 	int16_t ax, ay, az; // accelerometer
 	int16_t gx, gy, gz; // gyroscope
 };
-extern PuckInput g_in;
+#include "bonds.h" // NSLOT
+extern PuckInput g_in[NSLOT];

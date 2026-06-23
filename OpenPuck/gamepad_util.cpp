@@ -2,6 +2,26 @@
 #include "triton.h"
 #include "config.h"
 
+void psNeutralCalib(uint8_t *buf)
+{
+	// Payload offsets = kernel buf[] index minus 1. buf[0..5] gyro bias stays zero (caller memset). Symmetric
+	// ranges -> non-zero divisors on the host.
+	le16(buf + 6, 2844);
+	le16(buf + 8, -2844); // gyro pitch +/-
+	le16(buf + 10, 2844);
+	le16(buf + 12, -2844); // gyro yaw +/-
+	le16(buf + 14, 2844);
+	le16(buf + 16, -2844); // gyro roll +/-
+	le16(buf + 18, 2844);
+	le16(buf + 20, 2844); // gyro speed +/- (sum != 0)
+	le16(buf + 22, 8192);
+	le16(buf + 24, -8192); // accel X +/-
+	le16(buf + 26, 8192);
+	le16(buf + 28, -8192); // accel Y +/-
+	le16(buf + 30, 8192);
+	le16(buf + 32, -8192); // accel Z +/-
+}
+
 uint8_t swStick(int16_t v, bool invert)
 {
 	int32_t a = 0x80 + (invert ? -((int32_t)v >> 8) : ((int32_t)v >> 8));
@@ -138,6 +158,12 @@ static void psOrBackCode(uint32_t *b, uint8_t c)
 	case 17:
 		*b |= TB_MUTE;
 		break;
+	case 19:
+		*b |= TB_L2; // left trigger (L2)
+		break;
+	case 20:
+		*b |= TB_R2; // right trigger (R2)
+		break;
 	default:
 		break;
 	}
@@ -161,12 +187,13 @@ uint32_t psButtonsFromSteam(uint32_t raw)
 		psOrBackCode(&b, g_back[3]);
 	return b;
 }
-// DualSense / DS4 buttons[1]: L1..R3, Create(Share), Options(Start)
-uint8_t psShouldersByte(uint32_t b)
+// DualSense / DS4 buttons[1]: L1..R3, Create(Share), Options(Start). The analog trigger values come from
+// the per-slot `g_in[slot]` (pass lt/rt explicitly so a single shoulder byte never leaks across slots).
+uint8_t psShouldersByte(uint32_t b, uint8_t lt, uint8_t rt)
 {
 	return ((b & TB_LB) ? 0x01 : 0) | ((b & TB_RB) ? 0x02 : 0) |
-	       ((g_in.lt > SW_TRIG_ON || (b & 0x8000000u)) ? 0x04 : 0) |
-	       ((g_in.rt > SW_TRIG_ON || (b & 0x800000u)) ? 0x08 : 0) |
+	       ((lt > SW_TRIG_ON || (b & 0x8000000u)) ? 0x04 : 0) |
+	       ((rt > SW_TRIG_ON || (b & 0x800000u)) ? 0x08 : 0) |
 	       ((b & TB_MENU) ? 0x10 : 0) |
 	       ((b & TB_VIEW) ? 0x20 : 0) // Menu=Options, View=Create/Share
 	       | ((b & TB_L3) ? 0x40 : 0) | ((b & TB_R3) ? 0x80 : 0);

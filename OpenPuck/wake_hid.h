@@ -16,8 +16,13 @@
 
 #include <stdint.h>
 
-// register the boot-mouse wake interface (call from setup() for clean modes + normal puck boot)
+// register the boot-mouse wake interface (call from setup() for clean modes + normal puck boot). Locks its
+// TinyUSB HID instance index -- for dynamic-mount modes call this BEFORE the slot pool so it is HID instance 0.
 void wakeHidBegin();
+
+// Re-add the (already-begun) wake-mouse interface to a freshly-cleared config descriptor, for a dynamic
+// re-enumeration that doesn't reboot. begin() is once-only; this re-emits the interface descriptor.
+void wakeHidAddInterface();
 
 // true once wakeHidBegin() has registered the boot mouse this boot (false on the debug-CDC boot, which omits it)
 bool wakeHidPresent();

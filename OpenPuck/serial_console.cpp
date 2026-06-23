@@ -175,9 +175,13 @@ void serialConsolePoll()
 					g_connF1 = 0;
 				}
 				Serial.printf(
-					"# CONN mode %s: E7-awake[00 00] -> E3+GET-report-0x45 poll on ch%u (param=%02X). F1 seen=%lu\n",
-					g_connOn ? "ON" : "off", g_rfCh,
-					g_getParam, (unsigned long)g_connF1);
+					"# CONN mode %s: %s%s poll on ch%u (param=%02X). F1 seen=%lu\n",
+					g_connOn ? "ON" : "off",
+					g_e7announce ? "E7-awake[00 00] -> " : "",
+					g_pollGet ? "E3+GET-report-0x45" :
+						    "bare E3",
+					g_rfCh, g_getParam,
+					(unsigned long)g_connF1);
 			} else if (line[0] == 'q') {
 				g_getParam = g_getParam ? 0x00 : 0x2D;
 				Serial.printf("# GET-0x45 param=%02X\n",
@@ -210,34 +214,51 @@ void serialConsolePoll()
 					"# xbox-mouse friction=%d%% (higher=more glide/momentum)\n",
 					g_mFric);
 			} else if (line[0] == 'W') {
-				g_abSwap = !g_abSwap;
-				saveCfg();
-				Serial.printf(
-					"# A/B + X/Y swap %s (Nintendo layout)\n",
-					g_abSwap ? "ON" : "off");
+				// A/B swap edits the ACTIVE emulated type (Xbox/Switch/DS4/DS5); puck modes have none.
+				if (g_etype < ET_COUNT) {
+					g_type[g_etype].abSwap =
+						!g_type[g_etype].abSwap;
+					applyActiveType();
+					saveCfg();
+					Serial.printf(
+						"# A/B + X/Y swap %s (Nintendo layout) [type %u]\n",
+						g_abSwap ? "ON" : "off", g_etype);
+				} else
+					Serial.println(
+						"# A/B swap N/A in this mode (Steam/Lizard are not emulated types)");
 			} else if (line[0] == 'K') {
 				int i = line[1] - '0';
 				uint8_t code = strtoul(line + 2, 0, 10);
-				if (i >= 0 && i < 4) {
-					g_back[i] = code;
+				// back paddles edit the ACTIVE emulated type. code 18 = Capture/Screenshot (Switch only).
+				if (i >= 0 && i < 4 && g_etype < ET_COUNT) {
+					g_type[g_etype].back[i] = code;
+					applyActiveType();
 					saveCfg();
 					Serial.printf(
-						"# back[%d] (%s) -> code %u  [0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute]\n",
+						"# back[%d] (%s) -> code %u [type %u]  [0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute 18=Capture(Switch) 19=LT/L2/ZL 20=RT/R2/ZR]\n",
 						i,
 						(const char *[]){ "L4", "R4",
 								  "L5",
 								  "R5" }[i],
-						code);
-				} else
+						code, g_etype);
+				} else if (g_etype >= ET_COUNT)
+					Serial.println(
+						"# back map N/A in this mode (Steam/Lizard are not emulated types)");
+				else
 					Serial.println(
 						"# usage: K<0-3> <code>  (0=L4 1=R4 2=L5 3=R5)");
 			} else if (line[0] == 'Q') {
 				uint8_t code = strtoul(line + 1, 0, 10);
-				g_qamMap = code;
-				saveCfg();
-				Serial.printf(
-					"# QAM -> code %u  [0=default 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute]\n",
-					code);
+				if (g_etype < ET_COUNT) {
+					g_type[g_etype].qamMap = code;
+					applyActiveType();
+					saveCfg();
+					Serial.printf(
+						"# QAM -> code %u [type %u]  [0=default 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute 18=Capture(Switch) 19=LT/L2/ZL 20=RT/R2/ZR]\n",
+						code, g_etype);
+				} else
+					Serial.println(
+						"# QAM map N/A in this mode (Steam/Lizard are not emulated types)");
 			} else if (line[0] == 'J') {
 				char *sp = 0;
 				uint8_t id = strtoul(line + 1, &sp, 0);
@@ -246,7 +267,8 @@ void serialConsolePoll()
 				uint16_t val = sp ? strtoul(sp, 0, 0) : 0;
 				uint8_t pl[3] = { id, (uint8_t)(val & 0xFF),
 						  (uint8_t)(val >> 8) };
-				relayEnqueue(0x87, pl, 3);
+				// console-injected writes go to all connected controllers (no specific slot in scope)
+				relayEnqueue(0x87, pl, 3, 0xFF);
 				Serial.printf(
 					"# queued SET-SETTINGS id=0x%02X val=%u (relay 0x87) — watch new=/s\n",
 					id, val);
@@ -295,6 +317,54 @@ void serialConsolePoll()
 				Serial.printf(
 					"# QoS adaptive channel hopping %s (candidates 18,46,76,22,68)\n",
 					g_qos ? "ON" : "off");
+			} else if (line[0] == 'U') {
+				// Per-slot debug dump: which controllers are connected, their RSSI, haptic-block
+				// state, and session address. Quick at-a-glance view for multi-controller testing.
+				Serial.printf("# session ch%u, curSlot=%d\n",
+					      g_sessCh, g_curSlot);
+				for (int s = 0; s < NSLOT; s++) {
+					bool live = g_slot[s].used &&
+						    g_connReplyMs[s] != 0;
+					unsigned long age =
+						live ? (unsigned long)(millis() -
+								       g_connReplyMs
+									       [s]) :
+						       0;
+					int rssi =
+						g_linkRssi[s] ?
+							(int)g_linkRssi[s] -
+								RSSI_DBM_OFFSET :
+							0;
+					unsigned long now_ms = millis();
+					unsigned long blk =
+						(g_hapticBlockUntil[s] &&
+						 (int32_t)(g_hapticBlockUntil[s] -
+							   now_ms) > 0) ?
+							(g_hapticBlockUntil[s] -
+							 now_ms) :
+							0;
+					Serial.printf(
+						"# slot %d: %s addr %02X%02X%02X%02X/%02X rssi=%ddBm conn=%lums ago batt=%u%% haptic-block=%lums uuid %02X%02X%02X%02X %02X%02X%02X%02X\n",
+						s,
+						g_slot[s].used ?
+							(live ? "LIVE" :
+								"BONDED") :
+							"empty",
+						g_sessBase[s][0],
+						g_sessBase[s][1],
+						g_sessBase[s][2],
+						g_sessBase[s][3],
+						g_sessPrefix[s], rssi, age,
+						g_battery[s], blk,
+						g_slot[s].rec[0],
+						g_slot[s].rec[1],
+						g_slot[s].rec[2],
+						g_slot[s].rec[3],
+						g_slot[s].rec[4],
+						g_slot[s].rec[5],
+						g_slot[s].rec[6],
+						g_slot[s].rec[7]);
+				}
 			} else if (line[0] == 'r') {
 				g_rxWin = strtoul(line + 1, 0, 10);
 				if (g_rxWin < 150)
@@ -308,6 +378,22 @@ void serialConsolePoll()
 				Serial.printf(
 					"# E3 poll PID mode=%u (0=fixed07, 1=cyclePID+noack1, 2=cyclePID+noack0) - watch new=/s\n",
 					g_e3mode);
+			} else if (line[0] == 'd') {
+				g_pollGet = !g_pollGet;
+				Serial.printf(
+					"# poll = %s (real puck sends BARE E3) - watch F1=/s new=/s\n",
+					g_pollGet ? "E3 + GET-report-0x45 TLV (legacy)" :
+						    "bare E3");
+			} else if (line[0] == 'n') {
+				g_e7announce = !g_e7announce;
+				Serial.printf(
+					"# E7 awake-announce %s (real puck never sends E7) - watch F1=/s\n",
+					g_e7announce ? "ON (legacy)" : "off");
+			} else if (line[0] == 'm') {
+				g_e1keepalive = !g_e1keepalive;
+				Serial.printf(
+					"# session-channel E1 keepalive %s (real puck sends none; needed for shared addr) - watch F1=/s\n",
+					g_e1keepalive ? "ON" : "off");
 			} else if (line[0] == 't') {
 				// inject n test haptics (output 0x82 [01 01 F7]) over the relay
 				uint8_t n = line[1] ? strtoul(line + 1, 0, 10) :

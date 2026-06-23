@@ -11,25 +11,32 @@
 
 Adafruit_USBD_WebUSB usb_web;
 
-// blob payload = [ver=2][mode][mDiv][mFric][rsvd=0][abSwap][back0..3][connSlot(0xFF=none)][linkUp]
+// blob payload = [ver=9][mode][mDiv][mFric][qamMap(active)][abSwap(active)][back0..3(active)][connSlot(0xFF=none)][linkUp]
 //                [f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub][fwdNewOnly]
 //                [qos][persistMode][chordBtn B][chordBtn X][chordBtn Y][pollsps_lo][pollsps_hi]
 //                [loopPeriod_lo][loopPeriod_hi][loopWorstIdx][loopWorstUs_lo][loopWorstUs_hi]
 //                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
 //                [gitDirty][gitHash 12B ASCII, NUL-padded][rumbleScale][swPro120][swGyroScale10][raw accel ax ay az 3x s16 LE]
-// keep the blob under 64 bytes total (readBlob reads one 64-byte packet)
-#define WB_PAYLEN 60
+//                [bondedCount][slot0_up][slot0_batt][slot0_rssi]...[slot3_up][slot3_batt][slot3_rssi]
+//                [v9: per-type cfg, 4x7B: ET_XBOX/SWITCH/DS4/DS5 each {back0..3, qam, abSwap, padHaptics}]
+// p[6]/p[7]/p[8..11] mirror the ACTIVE type (legacy display). v9 extends to 101 bytes (103 total incl header);
+// browser reads with transferIn(128) to span the two USB-FS packets.
+#define WB_PAYLEN 101
 static void webusbSendBlob()
 {
 	if (!usb_web.connected())
 		return;
-	bool up = (g_connSlot >= 0 && (millis() - g_connReplyMs) < 300);
+	// "connected" = the most recent poll cycle's slot had a fresh F-reply (matches what the firmware
+	// presents to Steam on 0x79). The blob is sent on the panel's poll, so the slot + up flag change
+	// every ~250ms in normal use.
+	int cs = (g_curSlot >= 0 && g_curSlot < NSLOT) ? g_curSlot : 0;
+	bool up = (g_curSlot >= 0 && (millis() - g_connReplyMs[cs]) < 300);
 	uint8_t p[2 + WB_PAYLEN];
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (7 = +raw accel; 6 = +swPro120/gyroScale; 5 = +rumbleScale)
-	p[2] = 7;
+	// protocol version (9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
+	p[2] = 9;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -39,7 +46,7 @@ static void webusbSendBlob()
 	p[9] = g_back[1];
 	p[10] = g_back[2];
 	p[11] = g_back[3];
-	p[12] = (g_connSlot >= 0) ? (uint8_t)g_connSlot : 0xFF;
+	p[12] = (g_curSlot >= 0) ? (uint8_t)g_curSlot : 0xFF;
 	p[13] = up ? 1 : 0;
 	p[14] = (uint8_t)g_f1ps;
 	p[15] = (uint8_t)(g_f1ps >> 8);
@@ -68,8 +75,13 @@ static void webusbSendBlob()
 	p[36] = (uint8_t)(g_pollPeriodUs >>
 			  8); // measured poll period (intended 4000)
 	p[37] = OPK_LOG; // logging build? panel shows/hides its log UI
-	p[38] = g_battery; // controller battery % (report 0x43); 0=unknown
-	p[39] = g_linkRssi; // RAW signal strength |dBm| (0=no sample)
+	p[38] = g_battery
+		[g_curSlot >= 0 && g_curSlot < NSLOT ?
+			 g_curSlot :
+			 0]; // controller battery % (report 0x43); 0=unknown
+	p[39] = g_linkRssi[g_curSlot >= 0 && g_curSlot < NSLOT ?
+				   g_curSlot :
+				   0]; // RAW signal strength |dBm| (0=no sample)
 	// git commit this firmware was built from + dirty flag; injected at build time
 	// (build_info.h / gen_version.sh); "unknown" if the version header wasn't generated.
 	p[40] = OPK_GIT_DIRTY ? 1 : 0;
@@ -87,9 +99,33 @@ static void webusbSendBlob()
 	// Switch Pro gyro sensitivity x10 (protocol v6)
 	p[55] = g_swGyroScale10;
 	{
-		int16_t a[3] = { g_in.ax, g_in.ay, g_in.az };
+		int16_t a[3] = { g_in[0].ax, g_in[0].ay, g_in[0].az };
 		memcpy(&p[56], a, 6);
 	} // raw accelerometer for scale diagnostics (protocol v7)
+
+	// per-slot link status for all bond slots (protocol v8)
+	p[62] = (uint8_t)bondedSlotCount();
+	{
+		unsigned long nowMs = millis();
+		for (int s = 0; s < NSLOT; s++) {
+			bool sup = g_slot[s].used && g_connReplyMs[s] != 0 &&
+				   (nowMs - g_connReplyMs[s]) < 300u;
+			p[63 + s * 3] = sup ? 1 : 0;
+			p[64 + s * 3] = g_battery[s];
+			p[65 + s * 3] = g_linkRssi[s];
+		}
+	}
+	// per-emulated-type button config (protocol v9): 4 types x 7 bytes from p[75]
+	for (int et = 0; et < ET_COUNT; et++) {
+		uint8_t *q = &p[75 + et * 7];
+		q[0] = g_type[et].back[0];
+		q[1] = g_type[et].back[1];
+		q[2] = g_type[et].back[2];
+		q[3] = g_type[et].back[3];
+		q[4] = g_type[et].qamMap;
+		q[5] = g_type[et].abSwap;
+		q[6] = g_type[et].padHaptics;
+	}
 	usb_web.write(p, sizeof p);
 	usb_web.flush();
 }
@@ -160,7 +196,7 @@ void webusbPoll()
 				       (op == 0x03 || op == 0x05) ? 2 :
 				       (op == 0x0A)		  ? 4 :
 								    1;
-			if (op < 0x01 || op > 0x0A) { // resync: drop one byte
+			if (op < 0x01 || op > 0x0C) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
 			}
@@ -200,11 +236,48 @@ void webusbPoll()
 					delay(40);
 					NVIC_SystemReset();
 				}
+
+				// reboot into serial DFU (adafruit-nrfutil)
+			} else if (op == 0x0B) {
+				usb_web.flush();
+				delay(40);
+				enterSerialDfu();
+
+				// reboot into UF2 bootloader (USB mass storage)
+			} else if (op == 0x0C) {
+				usb_web.flush();
+				delay(40);
+				enterUf2Dfu();
+
 			} else if (op == 0x02) {
 				uint8_t f = buf[1], v = buf[2];
 
 				// every settable field persists (poll rate is no longer settable)
 				bool persist = true;
+				// per-type cfg writes (protocol v9): field = 40 + et*8 + k, k: 0..3 back, 4 qam, 5 abSwap,
+				// 6 padHaptics. Edits g_type[et]; refresh the live mirrors if it's the active type.
+				if (f >= 40 && f < 40 + ET_COUNT * 8) {
+					uint8_t et = (uint8_t)((f - 40) / 8),
+						k = (uint8_t)((f - 40) % 8);
+					if (et < ET_COUNT) {
+						if (k < 4)
+							g_type[et].back[k] = v;
+						else if (k == 4)
+							g_type[et].qamMap = v;
+						else if (k == 5)
+							g_type[et].abSwap = v ? 1 : 0;
+						else if (k == 6)
+							g_type[et].padHaptics =
+								v ? 1 : 0;
+						if (et == g_etype)
+							applyActiveType();
+					}
+					saveCfg();
+					webusbSendBlob();
+					memmove(buf, buf + need, n - need);
+					n -= need;
+					continue;
+				}
 				switch (f) {
 				case 1:
 					g_mDiv = v < 4 ? 4 : v;
@@ -213,14 +286,21 @@ void webusbPoll()
 					g_mFric = v > 99 ? 99 : v;
 					break;
 				// case 3 (padSmooth) removed -- Steam-mode pad coords are forwarded raw; Steam does its own smoothing.
+				// Legacy single-value fields (4 abSwap, 5-8 back, 21 qam) edit the ACTIVE emulated type.
 				case 4:
-					g_abSwap = v ? 1 : 0;
+					if (g_etype < ET_COUNT) {
+						g_type[g_etype].abSwap = v ? 1 : 0;
+						applyActiveType();
+					}
 					break;
 				case 5:
 				case 6:
 				case 7:
 				case 8:
-					g_back[f - 5] = v;
+					if (g_etype < ET_COUNT) {
+						g_type[g_etype].back[f - 5] = v;
+						applyActiveType();
+					}
 					break;
 				// case 9 (pollU100) removed -- poll rate is fixed at POLL_US_DEFAULT and no longer configurable.
 
@@ -274,9 +354,12 @@ void webusbPoll()
 					NVIC_SystemReset();
 					break;
 
-				// QAM physical button remap code (0=default/unmapped)
+				// QAM physical button remap code (0=default/unmapped) -- active emulated type
 				case 21:
-					g_qamMap = v;
+					if (g_etype < ET_COUNT) {
+						g_type[g_etype].qamMap = v;
+						applyActiveType();
+					}
 					break;
 
 				// rumble strength % (0=off, 100=1x, 200=double)
@@ -286,7 +369,7 @@ void webusbPoll()
 
 				// Switch Pro report rate (0=66Hz,1=120Hz,2=full)
 				case 23:
-					g_swProRate = (v <= 2) ? v : 1;
+					g_swProRate = (v <= 2) ? v : 2;
 					swProSaveCfg();
 					persist = false;
 					break;

@@ -235,7 +235,7 @@ void serialConsolePoll()
 					applyActiveType();
 					saveCfg();
 					Serial.printf(
-						"# back[%d] (%s) -> code %u [type %u]  [0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute 18=Capture(Switch)]\n",
+						"# back[%d] (%s) -> code %u [type %u]  [0=none 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute 18=Capture(Switch) 19=LT/L2/ZL 20=RT/R2/ZR]\n",
 						i,
 						(const char *[]){ "L4", "R4",
 								  "L5",
@@ -254,7 +254,7 @@ void serialConsolePoll()
 					applyActiveType();
 					saveCfg();
 					Serial.printf(
-						"# QAM -> code %u [type %u]  [0=default 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute 18=Capture(Switch)]\n",
+						"# QAM -> code %u [type %u]  [0=default 1=A 2=B 3=X 4=Y 5=LB 6=RB 7=L3 8=R3 9=Back 10=QAM 11=Guide 12=Dup 13=Ddown 14=Dleft 15=Dright 16=TouchClick 17=Mute 18=Capture(Switch) 19=LT/L2/ZL 20=RT/R2/ZR]\n",
 						code, g_etype);
 				} else
 					Serial.println(

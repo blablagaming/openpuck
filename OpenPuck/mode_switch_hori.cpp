@@ -61,6 +61,10 @@ static uint16_t codeToSwitch(uint8_t c, uint16_t fA, uint16_t fB, uint16_t fX,
 		return 0x1000;
 	case 18:
 		return 0x2000; // Capture / Screenshot (Switch-only target)
+	case 19:
+		return 0x40; // ZL (left trigger)
+	case 20:
+		return 0x80; // ZR (right trigger)
 	default:
 		return 0;
 	}

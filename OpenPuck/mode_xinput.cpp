@@ -352,6 +352,23 @@ static void rfXboxGamepad(uint8_t slot, const uint8_t *r)
 	uint8_t lt = trigU8(u16off(r, 4)),
 		rt = trigU8(u16off(
 			r, 6)); // triggers u16 (half-scale) -> full-range u8
+	// Trigger remaps (codes 19=LT, 20=RT): XInput triggers are analog bytes, not buttons, so a back paddle /
+	// QAM mapped to a trigger pulls it full. QAM arrives as TB_L2/TB_R2 (folded into b via tritonFromCode);
+	// back paddles are matched by their configured code.
+	if (b & TB_L2)
+		lt = 0xFF;
+	if (b & TB_R2)
+		rt = 0xFF;
+	const uint8_t bc[4] = { g_back[0], g_back[1], g_back[2], g_back[3] };
+	const uint32_t bm[4] = { TB_L4, TB_R4, TB_L5, TB_R5 };
+	for (int i = 0; i < 4; i++) {
+		if (!(b & bm[i]))
+			continue;
+		if (bc[i] == 19)
+			lt = 0xFF;
+		else if (bc[i] == 20)
+			rt = 0xFF;
+	}
 	xinputSend(slot, btn, lt, rt, (int16_t)s16off(r, 8),
 		   (int16_t)s16off(r, 10), // L stick X/Y
 		   (int16_t)s16off(r, 12),

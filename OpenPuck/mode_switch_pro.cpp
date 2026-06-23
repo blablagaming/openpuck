@@ -133,6 +133,10 @@ static uint32_t codeToJc(uint8_t c, uint32_t fA, uint32_t fB, uint32_t fX,
 		return JC_BTN_HOME;
 	case 18:
 		return JC_BTN_CAPTURE; // Capture / Screenshot (Switch-only target)
+	case 19:
+		return JC_BTN_ZL; // left trigger
+	case 20:
+		return JC_BTN_ZR; // right trigger
 	case 12:
 		return JC_BTN_UP;
 	case 13:

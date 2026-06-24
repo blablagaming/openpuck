@@ -133,17 +133,19 @@ def run(app):
         pygame.display.flip()
 
     def handle_tap(pos):
+        # Taps only ENQUEUE intents; the IO thread runs the actual grab()/send() so they never race the
+        # forwarding thread's serial/libusb access.
         if app.forwarding:
-            app.stop_forwarding()
+            app.request_stop()
             return
         # the remove-bond ✕ takes priority over the tile body it sits on
         for drect, slot in del_rects:
             if drect.collidepoint(pos):
-                app.remove_bond(slot)
+                app.request_remove(slot)
                 return
         for rect, slot, tappable in tile_rects:
             if rect.collidepoint(pos) and tappable:
-                app.toggle(slot)
+                app.request_toggle(slot)
                 return
 
     running = True
@@ -158,17 +160,13 @@ def run(app):
             elif ev.type == pygame.FINGERDOWN:
                 handle_tap((int(ev.x * W), int(ev.y * H)))
 
-        # One bad frame (a transient serial/USB/draw error) must never take the whole app down — log it
-        # and keep looping so a dongle/pad replug recovers on its own.
+        # Render only -- serial I/O + input forwarding run on app._io_loop (a separate thread) so the
+        # vsync'd flip() below can't throttle forwarding to 60Hz. A bad draw must never kill the app.
         try:
-            app.pump_serial()
-            app.pump_input()
-            app.auto_release_on_drop()
             draw()
         except Exception as ex:
-            app._flog("UI loop error: %r" % ex)
+            app._flog("UI draw error: %r" % ex)
             app.note = "recovered from error: %s" % ex
-        # high tick so forwarding input stays smooth; UI redraw is cheap
-        clock.tick(120)
+        clock.tick(60)  # UI render rate; forwarding is decoupled on the IO thread now
 
     pygame.quit()

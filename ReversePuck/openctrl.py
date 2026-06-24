@@ -18,7 +18,9 @@ Deps: pyserial + pygame (UI) + pyusb (input/USB detach). See README.md / the ./R
 import argparse
 import os
 import sys
+import threading
 import time
+from collections import deque
 
 import frame
 import input_source as isrc
@@ -61,6 +63,13 @@ class App:
         self.forwarding = False
         self.fwd_slot = None
         self.last_input = 0.0
+
+        # serial I/O + input forwarding run on a DEDICATED thread (see _io_loop): pygame's vsync'd
+        # flip() paces the UI render loop at the Deck's 60Hz, which was capping forwarding to 60Hz.
+        # The UI thread only draws + enqueues tap intents here; this thread owns self.ser/self.input.
+        self._cmdq = deque()
+        self._io_stop = threading.Event()
+        self._io_thread = None
 
         # model surfaced to the UI
         self.status = {"link_up": False, "link_slot": None, "sess_ch": 0,
@@ -276,6 +285,44 @@ class App:
             if not alive:
                 self.stop_forwarding()
 
+    # ---- UI -> IO thread intents (UI thread enqueues; _io_loop executes, so grab()/send() never run
+    #      concurrently with the forwarding thread's serial/libusb access) ----
+    def request_toggle(self, slot):
+        self._cmdq.append(("toggle", slot))
+
+    def request_stop(self):
+        self._cmdq.append(("stop", None))
+
+    def request_remove(self, slot):
+        self._cmdq.append(("remove", slot))
+
+    def _io_loop(self):
+        """Dedicated forwarding/serial thread, decoupled from the 60Hz UI render loop so input streams at
+        the full INPUT_HZ. SOLE owner of self.ser + self.input: the UI thread only enqueues intents."""
+        while not self._io_stop.is_set():
+            while self._cmdq:
+                try:
+                    kind, slot = self._cmdq.popleft()
+                except IndexError:
+                    break
+                try:
+                    if kind == "toggle":
+                        self.toggle(slot)
+                    elif kind == "stop":
+                        self.stop_forwarding()
+                    elif kind == "remove":
+                        self.remove_bond(slot)
+                except Exception as ex:
+                    self._flog("cmd %s error: %r" % (kind, ex))
+            try:
+                self.pump_serial()
+                self.pump_input()
+                self.auto_release_on_drop()
+            except Exception as ex:
+                self._flog("io loop error: %r" % ex)
+            # short sleep: pump_input self-throttles sends to INPUT_HZ, this just yields the CPU
+            time.sleep(0.001)
+
     # ---- loops ----
     def run_debug(self):
         last = 0
@@ -299,7 +346,14 @@ class App:
 
     def run_ui(self):
         import ui
-        ui.run(self)
+        self._io_stop.clear()
+        self._io_thread = threading.Thread(target=self._io_loop, daemon=True)
+        self._io_thread.start()
+        try:
+            ui.run(self)
+        finally:
+            self._io_stop.set()
+            self._io_thread.join(timeout=1.0)
 
 
 def main():

@@ -518,7 +518,10 @@ void SteamPuckController::task()
 	for (int s = 0; s < NSLOT; s++) {
 		if (!g_slot[s].used || !hid[s].ready())
 			continue;
-		bool conn = (millis() - g_connReplyMs[s] < 300);
+		// Debounced link state, not the raw 300 ms reply window: a brief RF gap must NOT toggle the
+		// connection edge, or each blip re-fires the 0x79=02 connect edge -> Steam re-runs connect handling
+		// (chime + connect-time haptic) -> buzz loop. g_linkUp drops only after a real outage (rf_link).
+		bool conn = g_linkUp[s];
 		// 0x79 connection state: on edge, then repeated every 750ms ONLY until Steam reacts (its first OUTPUT/
 		// settings write after the edge -- g_steamAliveMs). The real puck sends 0x79 ONCE, edge-triggered; an
 		// unconditional forever-resend re-triggers Steam's connect handling (connect chime) every 750ms before

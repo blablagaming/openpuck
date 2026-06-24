@@ -63,6 +63,9 @@ uint16_t g_pollsps = 0;
 uint16_t g_pollPeriodUs = 0;
 static uint32_t g_pollDtSum = 0;
 static uint16_t g_pollDtCnt = 0;
+// Debounced per-slot link state (see rf_link.h). Drives the haptic re-init, the 0x79 connect edge and the
+// haptic-task edge so a transient reply gap is not mistaken for a reconnect.
+volatile bool g_linkUp[NSLOT] = { false };
 // smoothed |dBm| of the controller's replies, per slot (0 = none yet)
 volatile uint8_t g_linkRssi[NSLOT] = { 0 };
 // battery % from the controller's report 0x43 (body[1]); 0 = none yet. Per-slot -- the active controller's
@@ -268,13 +271,15 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 				int s = (g_curSlot >= 0 && g_curSlot < NSLOT) ?
 						g_curSlot :
 						0;
-				// A reply after a long gap (or the first ever) = a (re)connect. Arm the haptic block + re-init HERE,
-				// directly off the reply stream -- reliable even when hapticTask's 300ms link-up edge doesn't fire
-				// (e.g. a power-cycled controller that reconnects without us cleanly seeing the link drop).
-				if (g_connReplyMs[s] == 0 ||
-				    (uint32_t)(millis() - g_connReplyMs[s]) >
-					    1500u)
+				// Genuine (re)connect = a debounced down->up edge, not merely a long reply gap. A
+				// transient gap (beacon contention, a handful of lost polls) keeps g_linkUp set, so it
+				// no longer re-arms the haptic block + re-init burst -- that re-arm on every >1.5s gap was
+				// the connect-time buzz on a flapping link. g_linkUp is cleared by the LINK_DOWN_MS
+				// watchdog in rfLinkTask or by a 0xF2, so a real reconnect still fires exactly once.
+				if (!g_linkUp[s]) {
+					g_linkUp[s] = true;
 					hapticOnReconnect(s);
+				}
 				g_connRx++;
 				// link alive -> loop() suppresses the redundant E1 beacon
 				g_connReplyMs[s] = millis();
@@ -299,6 +304,10 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 			// controller for 2.5s (a real multi-controller disconnect). The powering-off slot goes silent
 			// and ages out via SLOT_COLD on its own.
 			if (rtype == 0xF2) {
+				// explicit disconnect -> drop the link latch so the controller's eventual return is a
+				// clean reconnect (single haptic re-init), not a continuation of the old session.
+				if (g_curSlot >= 0 && g_curSlot < NSLOT)
+					g_linkUp[g_curSlot] = false;
 				int others = 0;
 				for (int i = 0; i < NSLOT; i++)
 					if (i != g_curSlot && g_slot[i].used &&
@@ -647,6 +656,11 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 #define SLOT_COLD_RETRY_MS 2000u
 static unsigned long g_slotLastAttemptMs[NSLOT] = {};
 
+// A slot stays "linked" the instant it answers and through brief RF gaps; only a sustained outage this long
+// (or a 0xF2) clears g_linkUp and counts as a disconnect for the haptic re-init / 0x79 connect edge. Well
+// above the worst transient gap (beacon contention, a few lost polls) and below SLOT_COLD_MS.
+#define LINK_DOWN_MS 2000u
+
 // Drive the connected-mode sequence. The cycle gate fires once per g_pollUs (250 Hz); each fire
 // polls EVERY warm slot back-to-back so all bonded controllers run at full rate regardless of count.
 // "Cold" means the slot WAS connected but has been silent for > SLOT_COLD_MS; slots that have never
@@ -762,18 +776,27 @@ static void rfConnStep()
 
 void rfLinkTask()
 {
+	// Clear the debounced link latch after a sustained outage so the controller's next reply is treated as
+	// a fresh (re)connect (one haptic re-init), while brief gaps below LINK_DOWN_MS keep it up.
+	for (int s = 0; s < NSLOT; s++)
+		if (g_linkUp[s] &&
+		    (uint32_t)(millis() - g_connReplyMs[s]) > LINK_DOWN_MS)
+			g_linkUp[s] = false;
 	// Host-frame beacon: sent continuously, INCLUDING while connected. The controller uses the periodic E1 (the
 	// real puck's per-hop-cycle announce) to stay synced and keep answering polls at full rate; suppressing it
 	// drops the reply rate from ~210/s to ~38/s. Paused only during the post-disconnect cooldown so a controller
 	// that's powering off isn't immediately re-woken/reconnected.
 	if (g_rfHost && millis() - g_connCooldown > 2500) {
 		bool connNow = anySlotLinkUp();
-		// session keepalive on the clean channel: every loop while connecting (fast), every 25ms once connected
-		// (every-loop beaconing also hammers the session ch and steals reply slots from the poll). The real puck
-		// sends NO E1 on its session channel; gated by g_e1keepalive ('m') so this can be A/B'd on hardware --
-		// but it stays ON by default because OpenPuck's shared-address model relies on E1 to advertise the session.
+		// session keepalive on the clean channel: every loop while connecting (fast), then SLOW once
+		// connected. RE of the controller shows it ADOPTS the advertised base/prefix/channel and HOLDS
+		// them for the session (the bond stores only UUIDs+serial), so it does not need the address
+		// re-advertised at 25ms -- the real puck sends no session E1 at all. A fast session beacon only
+		// steals reply windows from the poll -> reply-rate sag -> >LINK_DOWN_MS gaps -> spurious reconnect
+		// -> connect-time buzz. 1s is enough to re-sync a controller that briefly lost the session without
+		// contending with the 250Hz poll. Gated by g_e1keepalive ('m').
 		if (g_e1keepalive &&
-		    millis() - g_lastSessBeacon >= (connNow ? 25u : 0u)) {
+		    millis() - g_lastSessBeacon >= (connNow ? 1000u : 0u)) {
 			g_lastSessBeacon = millis();
 			g_rfCh = g_sessCh;
 			for (int s = 0; s < NSLOT; s++)

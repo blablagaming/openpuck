@@ -466,22 +466,19 @@ void hapticOnReconnect(int slot)
 }
 void hapticTask()
 {
-	// Per-slot link-edge detect (backup for hapticOnReconnect in rf_link).
-	static bool wasHapticLinkUp[NSLOT] = { 0 };
+	// Link-edge LOGGING only. The (re)connect haptic re-init is owned by rf_link's debounced g_linkUp
+	// down->up edge (fired off the reply stream). Re-arming here on the raw 300 ms hapticLinkUp() flag
+	// turned every transient reply gap into a re-init burst -> connect-time buzz on a flapping link.
+	static bool wasUp[NSLOT] = { 0 };
 	for (int s = 0; s < NSLOT; s++) {
 		if (!g_slot[s].used)
 			continue;
-		bool up = hapticLinkUp(s);
-		if (up && !wasHapticLinkUp[s]) {
-			uint8_t mk = 1;
-			hapLogAdd(0xFD, 0xEE, &mk, 1);
-			hapticOnReconnect(s);
-		}
-		if (!up && wasHapticLinkUp[s]) {
-			uint8_t mk = 0;
+		bool up = g_linkUp[s];
+		if (up != wasUp[s]) {
+			uint8_t mk = up ? 1 : 0;
 			hapLogAdd(0xFD, 0xEE, &mk, 1);
 		}
-		wasHapticLinkUp[s] = up;
+		wasUp[s] = up;
 	}
 	if (g_reinitAt && anySlotLinkUp() &&
 	    (int32_t)(millis() - g_reinitAt) >= 0) {

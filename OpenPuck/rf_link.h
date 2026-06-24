@@ -61,6 +61,13 @@ extern int g_curSlot;
 // re-init gating (we only re-init on a real link) and the beacon pacing.
 bool anySlotLinkUp();
 
+// Debounced per-slot link state: set true on the first F-type reply, held through brief reply gaps, and
+// dropped only on a real outage (no reply for LINK_DOWN_MS) or an explicit 0xF2 disconnect. The haptic
+// re-init, the USB 0x79 connect edge, and the haptic-task link edge all key off THIS rather than the raw
+// 300 ms reply window, so a transient RF gap (beacon contention, a few lost polls) can't masquerade as a
+// reconnect and loop the connect-time haptic.
+extern volatile bool g_linkUp[NSLOT];
+
 // QoS adaptive channel hopping
 extern uint8_t g_qos; // 0=off (static g_sessCh), 1=auto-hop on degradation
 extern uint8_t g_hopIdx;

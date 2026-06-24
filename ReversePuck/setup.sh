@@ -3,7 +3,7 @@
 # Run ONCE PER BOOT from Desktop Mode:   sudo ./setup.sh
 #
 # Opens, for this boot only (nothing on the read-only FS changes -- re-run after a reboot):
-#   * /dev/ttyACM*                      -- the nRF (OpenController) CDC link
+#   * /dev/ttyACM*                      -- the nRF (ReversePuck) CDC link
 #   * the Deck controller's usbfs node  -- so the app's libusb DeckSource can detach + read it
 #                                          (28DE:1205); this is what lets it take the pad from Steam
 # /dev/input/event* is already granted to the active session (logind ACL) for the --evdev fallback.

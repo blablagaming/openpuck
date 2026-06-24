@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""openctrl.py -- Steam Deck forwarder for the OpenController emulated Steam Controller 2.
+"""openctrl.py -- Steam Deck forwarder for the ReversePuck emulated Steam Controller 2.
 
 Runs on the Steam Deck (Desktop Mode). Opens the nRF (Valve 28DE:1302) CDC port, reads its STATUS
 stream (which bonded pucks are live), and shows a fullscreen touchscreen UI of tappable puck tiles.
@@ -13,7 +13,7 @@ link, and control returns to the Deck.
     python3 openctrl.py --evdev         # use the evdev fallback input source (lower fidelity)
 
 The dongle (nRF CDC) is hot-pluggable: launch with or without it, it appears/disappears live.
-Deps: pyserial + pygame (UI) + pyusb (input/USB detach). See README.md / run.sh.
+Deps: pyserial + pygame (UI) + pyusb (input/USB detach). See README.md / the ./ReversePuck launcher.
 """
 import argparse
 import os
@@ -24,7 +24,8 @@ import frame
 import input_source as isrc
 
 VID = 0x28DE
-PID = 0x1302  # the OpenController emulated controller
+PID = 0x1302  # the ReversePuck emulated controller (nRF "dongle")
+PUCK_PID = 0x1304  # a puck's own CDC -- never grab this as the dongle
 INPUT_HZ = 250.0
 
 
@@ -36,9 +37,9 @@ def find_port():
     for p in list_ports.comports():
         if (p.vid, p.pid) == (VID, PID):
             return p.device
-    # fall back: any Valve CDC
+    # fall back: any Valve CDC except a puck's (so a puck docked on the Deck isn't mistaken for it)
     for p in list_ports.comports():
-        if p.vid == VID:
+        if p.vid == VID and p.pid != PUCK_PID:
             return p.device
     return None
 
@@ -64,7 +65,7 @@ class App:
         # model surfaced to the UI
         self.status = {"link_up": False, "link_slot": None, "sess_ch": 0,
                        "bonds": [], "forwarding": False}
-        self.note = "waiting for OpenController dongle (28DE:1302)…"
+        self.note = "waiting for ReversePuck dongle (28DE:1302)…"
         self.log = []  # firmware '#' diagnostic lines (the in-app serial monitor)
 
         # file log: everything (firmware '#' lines + app events) with timestamps, for sharing.
@@ -111,9 +112,9 @@ class App:
             self.ser = None  # e.g. permission / busy; will retry
 
     def _drop_serial(self, why):
-        """Tear down on disconnect: stop forwarding, close the port, reset the model."""
-        if self.forwarding:
-            self.stop_forwarding()
+        """Tear down on disconnect: close the port FIRST so we never try to write to a gone dongle, then
+        release the grabbed pad locally and reset the model. (Closing first also makes send() a no-op, so
+        there's no re-entrant _drop_serial via a failing write.)"""
         try:
             if self.ser:
                 self.ser.close()
@@ -121,6 +122,7 @@ class App:
             pass
         self.ser = None
         self.port_name = None
+        self._release_local()  # hand the pad back without trying to notify the dongle that's gone
         self.status = {"link_up": False, "link_slot": None, "sess_ch": 0,
                        "bonds": [], "forwarding": False}
         self.note = "dongle disconnected (%s) — waiting…" % why
@@ -192,6 +194,9 @@ class App:
         try:
             self._ensure_input().grab()
         except Exception as ex:
+            # roll back any partial interface claim so the pad is never left half-detached, and force a
+            # clean rebuild of the source next time (the cached handle may be wedged).
+            self._drop_input("grab failed: %s" % ex)
             self.note = "grab failed: %s" % ex
             return
         self.forwarding = True
@@ -200,14 +205,31 @@ class App:
         self.note = "forwarding -> slot %s (%s)" % (slot, self.input.name)
         self._flog("APP forwarding START slot=%s input=%s" % (slot, self.input.name))
 
-    def stop_forwarding(self):
+    def _release_local(self):
+        """Clear forwarding state + ungrab the pad locally, WITHOUT notifying the dongle (used when the
+        dongle or input device has gone away, so there's nothing to tell)."""
         self.forwarding = False
         self.fwd_slot = None
-        self.send(frame.build_set_forwarding(False))
         if self.input:
-            self.input.ungrab()
+            try:
+                self.input.ungrab()
+            except Exception:
+                pass
+
+    def stop_forwarding(self):
+        """Clean, user-initiated stop: tell the firmware to stop forwarding, then release the pad."""
+        if self.forwarding:
+            self.send(frame.build_set_forwarding(False))
+        self._release_local()
         self.note = "control returned to Deck"
         self._flog("APP forwarding STOP")
+
+    def _drop_input(self, why):
+        """Tear down the input source and force a rebuild on the next grab, so a transient USB hiccup on
+        the Deck pad (or a failed grab) can't wedge the app behind a dead handle."""
+        self._release_local()
+        self.input = None
+        self._flog("input dropped: %s" % why)
 
     def toggle(self, slot):
         """Tap handler: a tappable tile is one whose puck is live (alive)."""
@@ -228,7 +250,17 @@ class App:
     def pump_input(self):
         if not self.forwarding or not self.input:
             return
-        st = self.input.pump()
+        try:
+            st = self.input.pump()
+        except Exception as ex:
+            # the pad raised (USB reset / yanked) mid-forward. Notify the firmware to stop (the dongle is
+            # likely still up, so the puck doesn't freeze on the last frame), then drop the dead handle so
+            # the next tap rebuilds it -- never let this bubble up and kill the loop.
+            self._flog("input pump error: %s" % ex)
+            self.stop_forwarding()
+            self.input = None
+            self.note = "input device error — control returned to Deck"
+            return
         now = time.monotonic()
         if now - self.last_input >= 1.0 / INPUT_HZ:
             self.last_input = now
@@ -248,9 +280,12 @@ class App:
     def run_debug(self):
         last = 0
         while True:
-            self.pump_serial()
-            self.pump_input()
-            self.auto_release_on_drop()
+            try:
+                self.pump_serial()
+                self.pump_input()
+                self.auto_release_on_drop()
+            except Exception as ex:
+                self._flog("debug loop error: %r" % ex)
             if time.monotonic() - last > 0.5:
                 last = time.monotonic()
                 s = self.status
@@ -268,7 +303,7 @@ class App:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Steam Deck forwarder for OpenController")
+    ap = argparse.ArgumentParser(description="Steam Deck forwarder for ReversePuck")
     ap.add_argument("--port", help="CDC port (default: autodetect Valve 28DE:1302)")
     ap.add_argument("--input", help="force an evdev node, e.g. /dev/input/event12 (only with --evdev)")
     ap.add_argument("--evdev", action="store_true",
@@ -289,6 +324,12 @@ def main():
     finally:
         if app.forwarding:
             app.stop_forwarding()
+        # belt-and-suspenders: never exit with the Deck pad still detached from Steam
+        if app.input:
+            try:
+                app.input.ungrab()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

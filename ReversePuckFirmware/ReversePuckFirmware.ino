@@ -1,4 +1,4 @@
-// OpenController.ino -- emulated Steam Controller 2 ("Triton"/IBEX) for an nRF52840 Pro Micro.
+// ReversePuckFirmware.ino -- emulated Steam Controller 2 ("Triton"/IBEX) for an nRF52840 Pro Micro.
 //
 // The mirror image of OpenPuck: instead of receiving a real controller over RF and presenting it to a
 // host, this firmware RECEIVES input from a Steam Deck over USB-CDC and TRANSMITS it over the puck RF
@@ -12,7 +12,7 @@
 //   ctrl_usb                -- the USB 28DE:1302 face + steamless pairing command channel
 //
 // Build:  arduino-cli compile -b adafruit:nrf52:feather52840 \
-//           --build-property "build.extra_flags=-DNRF52840_XXAA {build.flags.usb}" OpenController
+//           --build-property "build.extra_flags=-DNRF52840_XXAA {build.flags.usb}" ReversePuckFirmware
 #include <Adafruit_TinyUSB.h>
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
@@ -56,8 +56,9 @@ void setup()
 	for (int i = 0; i < NBOND; i++)
 		if (g_bond[i].used)
 			nb++;
-	Serial.printf("# OpenController up: unit=%s bonds=%d (28DE:1302)\n",
-		      g_unit, nb);
+	Serial.printf(
+		"# ReversePuck controller up: unit=%s bonds=%d (28DE:1302)\n",
+		g_unit, nb);
 
 	// Hardware watchdog (~8s): a wedged RX busy-wait or blocked CDC write self-recovers without a replug.
 	NRF_WDT->CONFIG = (WDT_CONFIG_HALT_Pause << WDT_CONFIG_HALT_Pos) |

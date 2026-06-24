@@ -26,7 +26,7 @@ def _font(sz, bold=False):
 
 def run(app):
     pygame.init()
-    pygame.display.set_caption("OpenController · Steam Deck")
+    pygame.display.set_caption("ReversePuck · Steam Deck")
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     W, H = screen.get_size()
     clock = pygame.time.Clock()
@@ -62,7 +62,7 @@ def run(app):
         th = int((H * 0.42 - gap * max(0, len(bonds) - 1)) / max(1, len(bonds)))
         th = min(th, int(H * 0.20))
         if not connected:
-            msg = f_big.render("Plug in the OpenController dongle", True, WARN)
+            msg = f_big.render("Plug in the ReversePuck dongle", True, WARN)
             screen.blit(msg, (W // 2 - msg.get_width() // 2, H // 2 - 40))
             sub = f_small.render("Waiting for the nRF (Valve 28DE:1302) on USB… it'll appear here automatically.",
                                  True, DIM)
@@ -158,10 +158,16 @@ def run(app):
             elif ev.type == pygame.FINGERDOWN:
                 handle_tap((int(ev.x * W), int(ev.y * H)))
 
-        app.pump_serial()
-        app.pump_input()
-        app.auto_release_on_drop()
-        draw()
+        # One bad frame (a transient serial/USB/draw error) must never take the whole app down — log it
+        # and keep looping so a dongle/pad replug recovers on its own.
+        try:
+            app.pump_serial()
+            app.pump_input()
+            app.auto_release_on_drop()
+            draw()
+        except Exception as ex:
+            app._flog("UI loop error: %r" % ex)
+            app.note = "recovered from error: %s" % ex
         # high tick so forwarding input stays smooth; UI redraw is cheap
         clock.tick(120)
 

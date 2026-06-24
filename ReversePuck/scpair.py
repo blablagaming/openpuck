@@ -3,8 +3,8 @@
 
 The Linux equivalent of pairtui/scmd.c (which is macOS/IOKit). Talks the Valve feature-report command
 channel on the usagePage-0x01 control interface over /dev/hidraw* (HIDIOCSFEATURE / HIDIOCGFEATURE).
-Used to pair on the Steam Deck itself when BOTH the puck (PID 1304) and the OpenController (PID 1302)
-are plugged into the Deck -- or run it on any Linux box.
+Used to pair on the Steam Deck itself when BOTH the puck (PID 1304) and the ReversePuck controller
+(PID 1302) are plugged into the Deck -- or run it on any Linux box.
 
 Pairing flow (protocol/USB_COMMANDS.md, == pairtui.pair_full):
   1. fresh 8-byte key (r1,r2)
@@ -192,7 +192,7 @@ def pair(slot=None):
     if not pucks:
         raise SystemExit("no puck (28DE:1304) control interface found")
     if not ctrls:
-        raise SystemExit("no controller (28DE:1302) control interface found — plug the OpenController in")
+        raise SystemExit("no controller (28DE:1302) control interface found — plug the ReversePuck controller in")
     ctrl = ctrls[0]
     puck_serial = pucks[0].read_serial(2) or "FXB000000000"
     ctrl_serial = ctrl.read_serial(1) or "FXA000000000"

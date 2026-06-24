@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# OpenController Steam Deck forwarder launcher (uv-based; nothing installed system-wide).
+# ReversePuck Steam Deck forwarder launcher (uv-based; nothing installed system-wide).
 #
 # Add as a NON-STEAM GAME:
-#   Target:      /home/deck/…/deck/run.sh
-#   Start In:    /home/deck/…/deck/         (the directory this script is in)
+#   Target:      /home/deck/…/ReversePuck/ReversePuck
+#   Start In:    /home/deck/…/ReversePuck/    (the directory this script is in)
 # Then, in that shortcut's gear -> Properties -> Controller, set "Disable Steam Input" so Steam doesn't
 # fight us for the built-in pad while we grab it.
 #
@@ -12,7 +12,7 @@
 #
 # USB-level detach (DeckSource) needs access to the controller's usbfs node, and the CDC link needs
 # /dev/ttyACM*. Run `sudo ./setup.sh` once per boot to open both (see README). Without it, fall back to
-# `./run.sh --evdev` (no USB detach; Steam/QAM won't forward, trackpads are lower fidelity).
+# `./ReversePuck --evdev` (no USB detach; Steam/QAM won't forward, trackpads are lower fidelity).
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 

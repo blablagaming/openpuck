@@ -1,4 +1,4 @@
-"""frame.py -- the USB-CDC wire protocol shared with OpenController/deck_input.cpp.
+"""frame.py -- the USB-CDC wire protocol shared with ReversePuckFirmware/deck_input.cpp.
 
     frame = [0xA5][0x5A][type][len][payload(len)][sum8(type,len,payload...)]
 

@@ -47,6 +47,13 @@ static Adafruit_USBD_HID g_hid;
 static uint8_t g_resp[63];
 static uint16_t g_resp_len = 0;
 static volatile bool g_rebootPending = false;
+// 0x95 reboots into wireless mode, which drops USB. If we reset before the host has read back the
+// command's ACK, Steam sees the disconnect mid-transaction and reports "pairing failed" even though the
+// bond is already on flash. So we wait for the host to GET the response (g_respRead), or REBOOT_GRACE_MS
+// for a host that fires 0x95 without reading back (scpair.py does this), before resetting.
+static volatile bool g_respRead = false;
+static uint32_t g_rebootAt = 0;
+static const uint32_t REBOOT_GRACE_MS = 400;
 
 // Select bond slot from a Zephyr settings key string: "esb/bond" -> 0, "esb/bond_2" -> 1.
 static int slotForKey(const char *key)
@@ -211,9 +218,12 @@ static void handleSet(uint8_t rid, hid_report_type_t type, uint8_t const *b,
 			memcpy(g_resp + 2, g_bond[0].rec, 24);
 		g_resp_len = 63;
 		break;
-	// reboot into wireless mode (magic 0xA427AF52); the reset happens after the flash flush
+	// reboot into wireless mode (magic 0xA427AF52); the reset happens after the flash flush AND once the
+	// host has read the ACK back (see g_respRead / REBOOT_GRACE_MS above)
 	case 0x95:
 		g_rebootPending = true;
+		g_respRead = false;
+		g_rebootAt = millis();
 		if (Serial.availableForWrite() > 40)
 			Serial.println("# 0x95 reboot-to-wireless requested");
 		g_resp[0] = 0x95;
@@ -235,6 +245,13 @@ static uint16_t handleGet(uint8_t rid, hid_report_type_t type, uint8_t *buf,
 	(void)rid;
 	if (type != HID_REPORT_TYPE_FEATURE)
 		return 0;
+	// The host read the staged response -> the SET/GET transaction completed. Used to know a 0x95 ACK
+	// landed before we drop USB, and as a serial-monitor trace of Steam's pairing read sequence (the SET
+	// side is logged in handleSet; a bare GET with no preceding SET shows up here as a stale g_resp[0]).
+	g_respRead = true;
+	if (Serial.availableForWrite() > 40)
+		Serial.printf("# GET rid=%u -> %02X %02X req=%u\n", rid,
+			      g_resp[0], g_resp[1], (unsigned)reqlen);
 	uint16_t nn = g_resp_len ? g_resp_len : 63;
 	if (nn > reqlen)
 		nn = reqlen;
@@ -260,9 +277,13 @@ void ctrlUsbPoll()
 		g_bondDirty = false;
 		saveCtrlBonds();
 	}
-	// reboot only AFTER the freshly-written bond is on flash (else it reloads a stale bond on boot).
-	if (g_rebootPending && !g_bondDirty) {
-		delay(40);
+	// reboot only AFTER the freshly-written bond is on flash (else it reloads a stale bond on boot) AND
+	// the host has read the 0x95 ACK back (or the grace window lapsed for a fire-and-forget host) so the
+	// USB drop never lands mid-transaction and reads to Steam as a pairing failure.
+	if (g_rebootPending && !g_bondDirty &&
+	    (g_respRead ||
+	     (uint32_t)(millis() - g_rebootAt) > REBOOT_GRACE_MS)) {
+		delay(20);
 		NVIC_SystemReset();
 	}
 }

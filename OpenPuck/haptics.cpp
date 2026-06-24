@@ -338,6 +338,15 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1)
 	while (g_rqTail[cur] != g_rqHead[cur]) {
 		RelayMsg &m = g_rq[cur][g_rqTail[cur]];
 
+		// 0x82 stop (gain 0): drop it. The real puck NEVER sends a 0x82 stop (sniff1.json) -- its haptic is
+		// keep-alive `82 01 01 f7` re-sent ~every 18ms and simply auto-decays when the frames stop. Relaying
+		// Steam's stop frames is an extra on-air actuator frame the reference never emits, and per this file's
+		// header every extra 0x82 is an audible click. Drain without TX; the haptic decays on its own.
+		if (m.rid == 0x82 && m.len >= 3 && m.data[0] == 0x01 &&
+		    m.data[1] == 0x01 && m.data[2] == 0x00) {
+			g_rqTail[cur] = rqNext(g_rqTail[cur]);
+			continue;
+		}
 		// rid 0 = entry voided by hapticCancelPendingOn -> skip
 		if (m.rid) {
 			uint8_t rl = m.len;

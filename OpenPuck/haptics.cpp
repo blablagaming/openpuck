@@ -432,6 +432,13 @@ void hapticReinit(uint8_t slot)
 	// above, which would otherwise re-enable it). Default-on types send "enable"; Switch (padHaptics=0)
 	// disables. Inert until the setting id is captured.
 	hapticSetPadEnabled(slot, g_padHaptics != 0);
+	// Apply the configured LED brightness for the active emulated type. Steam sets the
+	// brightness each session; emulated modes never do, so the controller comes up at
+	// full brightness. 0 = no override (preserve controller default).
+	if (g_etype < ET_COUNT && g_ledBright > 0) {
+		uint8_t pl[3] = { 0x2D, g_ledBright, 0x00 };
+		relayEnqueue(0x87, pl, sizeof pl, slot);
+	}
 }
 void hapticInit()
 {

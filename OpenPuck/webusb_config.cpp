@@ -11,17 +11,17 @@
 
 Adafruit_USBD_WebUSB usb_web;
 
-// blob payload = [ver=9][mode][mDiv][mFric][qamMap(active)][abSwap(active)][back0..3(active)][connSlot(0xFF=none)][linkUp]
+// blob payload = [ver=10][mode][mDiv][mFric][qamMap(active)][abSwap(active)][back0..3(active)][connSlot(0xFF=none)][linkUp]
 //                [f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub][fwdNewOnly]
 //                [qos][persistMode][chordBtn B][chordBtn X][chordBtn Y][pollsps_lo][pollsps_hi]
 //                [loopPeriod_lo][loopPeriod_hi][loopWorstIdx][loopWorstUs_lo][loopWorstUs_hi]
 //                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
 //                [gitDirty][gitHash 12B ASCII, NUL-padded][rumbleScale][swPro120][swGyroScale10][raw accel ax ay az 3x s16 LE]
 //                [bondedCount][slot0_up][slot0_batt][slot0_rssi]...[slot3_up][slot3_batt][slot3_rssi]
-//                [v9: per-type cfg, 4x7B: ET_XBOX/SWITCH/DS4/DS5 each {back0..3, qam, abSwap, padHaptics}]
-// p[6]/p[7]/p[8..11] mirror the ACTIVE type (legacy display). v9 extends to 101 bytes (103 total incl header);
+//                [v10: per-type cfg, 4x8B: ET_XBOX/SWITCH/DS4/DS5 each {back0..3, qam, abSwap, padHaptics, ledBright}]
+// p[6]/p[7]/p[8..11] mirror the ACTIVE type (legacy display). v10 extends to 105 bytes (107 total incl header);
 // browser reads with transferIn(128) to span the two USB-FS packets.
-#define WB_PAYLEN 101
+#define WB_PAYLEN 105
 static void webusbSendBlob()
 {
 	if (!usb_web.connected())
@@ -35,8 +35,8 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
-	p[2] = 9;
+	// protocol version (10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
+	p[2] = 10;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -115,9 +115,9 @@ static void webusbSendBlob()
 			p[65 + s * 3] = g_linkRssi[s];
 		}
 	}
-	// per-emulated-type button config (protocol v9): 4 types x 7 bytes from p[75]
+	// per-emulated-type button config (protocol v10): 4 types x 8 bytes from p[75]
 	for (int et = 0; et < ET_COUNT; et++) {
-		uint8_t *q = &p[75 + et * 7];
+		uint8_t *q = &p[75 + et * 8];
 		q[0] = g_type[et].back[0];
 		q[1] = g_type[et].back[1];
 		q[2] = g_type[et].back[2];
@@ -125,6 +125,7 @@ static void webusbSendBlob()
 		q[4] = g_type[et].qamMap;
 		q[5] = g_type[et].abSwap;
 		q[6] = g_type[et].padHaptics;
+		q[7] = g_type[et].ledBright;
 	}
 	usb_web.write(p, sizeof p);
 	usb_web.flush();
@@ -254,8 +255,8 @@ void webusbPoll()
 
 				// every settable field persists (poll rate is no longer settable)
 				bool persist = true;
-				// per-type cfg writes (protocol v9): field = 40 + et*8 + k, k: 0..3 back, 4 qam, 5 abSwap,
-				// 6 padHaptics. Edits g_type[et]; refresh the live mirrors if it's the active type.
+				// per-type cfg writes (protocol v10): field = 40 + et*8 + k, k: 0..3 back, 4 qam, 5 abSwap,
+				// 6 padHaptics, 7 ledBright. Edits g_type[et]; refresh the live mirrors if it's the active type.
 				if (f >= 40 && f < 40 + ET_COUNT * 8) {
 					uint8_t et = (uint8_t)((f - 40) / 8),
 						k = (uint8_t)((f - 40) % 8);
@@ -270,6 +271,10 @@ void webusbPoll()
 						else if (k == 6)
 							g_type[et].padHaptics =
 								v ? 1 : 0;
+						else if (k == 7)
+							g_type[et].ledBright =
+								v > 100 ? 100 :
+									  v;
 						if (et == g_etype)
 							applyActiveType();
 					}

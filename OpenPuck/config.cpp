@@ -21,12 +21,12 @@ int g_mDiv = 64, g_mFric = 94;
 
 // Per-type button config. back default {5,6,7,8} = L4->LB R4->RB L5->L3 R5->R3 (0..11 buttons, 12..15 D-pad,
 // 16/17 PS touch/mute, 18 Switch Capture). Switch differs: QAM defaults to Capture(18), A/B swap on, and
-// trackpad haptics off. qamMap 0 = unmapped (hardcoded per-mode behavior).
+// trackpad haptics off. qamMap 0 = unmapped (hardcoded per-mode behavior). ledBright 0 = no override.
 TypeCfg g_type[ET_COUNT] = {
-	/* ET_XBOX   */ { { 5, 6, 7, 8 }, 0, 0, 1 },
-	/* ET_SWITCH */ { { 5, 6, 7, 8 }, 18, 1, 0 },
-	/* ET_DS4    */ { { 5, 6, 7, 8 }, 0, 0, 1 },
-	/* ET_DS5    */ { { 5, 6, 7, 8 }, 0, 0, 1 },
+	/* ET_XBOX   */ { { 5, 6, 7, 8 }, 0, 0, 1, 0 },
+	/* ET_SWITCH */ { { 5, 6, 7, 8 }, 18, 1, 0, 0 },
+	/* ET_DS4    */ { { 5, 6, 7, 8 }, 0, 0, 1, 0 },
+	/* ET_DS5    */ { { 5, 6, 7, 8 }, 0, 0, 1, 0 },
 };
 uint8_t g_etype = ET_NONE;
 
@@ -35,6 +35,7 @@ uint8_t g_abSwap = 0;
 uint8_t g_back[4] = { 5, 6, 7, 8 };
 uint8_t g_qamMap = 0;
 uint8_t g_padHaptics = 1;
+uint8_t g_ledBright = 0;
 
 void applyActiveType()
 {
@@ -48,6 +49,7 @@ void applyActiveType()
 		g_qamMap = 0;
 		g_abSwap = 0;
 		g_padHaptics = 1;
+		g_ledBright = 0;
 		return;
 	}
 	const TypeCfg &t = g_type[g_etype];
@@ -56,6 +58,7 @@ void applyActiveType()
 	g_qamMap = t.qamMap;
 	g_abSwap = t.abSwap;
 	g_padHaptics = t.padHaptics;
+	g_ledBright = t.ledBright;
 }
 // rumble strength % (200 = double); adjustable from the WebUSB panel
 uint8_t g_rumbleScale = 200;
@@ -65,8 +68,8 @@ uint8_t g_rumbleScale = 200;
 const uint32_t g_pollUs = POLL_US_DEFAULT;
 
 #define CFG_FILE "/cfg.bin"
-// bumped (per-type TypeCfg blob replaces scalar abSwap/back/qamMap): old cfg ignored -> clean defaults on first boot
-#define CFG_MAGIC 0xCA
+// TypeCfg size changed; old flash format is incompatible -> clean defaults on first boot after upgrade
+#define CFG_MAGIC 0xCB
 struct Cfg {
 	uint8_t magic, mode, mDiv, mFric, rsvd0, pollU100, persistMode,
 		bootMode, chordBtn[3], rumbleScale;

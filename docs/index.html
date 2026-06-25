@@ -190,7 +190,7 @@ function log(m){ const l=$("#log"); l.textContent=(new Date().toLocaleTimeString
 
 // Per-emulated-type config (must match firmware ET_* order: Xbox=0, Switch=1, DS4=2, DS5=3). Each type lists
 // only the remap targets that exist on that controller. Field id sent to firmware = 40 + et*8 + k
-// (k: 0..3 back paddles, 4 QAM, 5 A/B-swap, 6 trackpad-haptics). Blob v9 reads them back at p[75 + et*7 + ...].
+// (k: 0..3 back paddles, 4 QAM, 5 A/B-swap, 6 trackpad-haptics, 7 LED brightness). Blob v10 reads them back at p[73 + et*8 + ...].
 const DPAD = {12:"D-pad Up",13:"D-pad Down",14:"D-pad Left",15:"D-pad Right"};
 const TYPE_DEFS = [
   {key:"XBOX", name:"Xbox", labels:{1:"A",2:"B",3:"X",4:"Y",5:"LB",6:"RB",7:"L3",8:"R3",9:"Back",10:"Start",11:"Guide",19:"LT",20:"RT",...DPAD}},
@@ -201,7 +201,7 @@ const TYPE_DEFS = [
 // Which emulated type a USB mode belongs to (mirror of firmware etypeForMode); -1 = puck mode (no type).
 function etypeForMode(m){ switch(m){case 1:return 0; case 2:case 4:return 1; case 6:case 8:return 2; case 5:case 7:return 3; default:return -1;} }
 const BACK_LABELS = ["L4 (back upper-left)","R4 (back upper-right)","L5 (back lower-left)","R5 (back lower-right)"];
-const typeEls = []; // per-type {sec, abSwap, pad, back[4], qam}
+const typeEls = []; // one entry per TYPE_DEFS: {sec, tab, activeDot, back[], qam, abSwap, pad, led, ledV}
 function mkSelect(def, includeNone){
   const sel=document.createElement("select");
   if(includeNone){ const o=document.createElement("option"); o.value=0; o.textContent="— none —"; sel.appendChild(o); }
@@ -229,7 +229,7 @@ function setTab(et){
     tab.onclick=()=>setTab(et); bar.appendChild(tab);
     // panel
     const sec=document.createElement("div"); sec.style.cssText="background:#0e1017;border:1px solid #232a3a;border-radius:8px;padding:12px 14px;display:none";
-    const rec={sec,tab,activeDot:tab.querySelector(".active-dot"),back:[],qam:null,abSwap:null,pad:null};
+    const rec={sec,tab,activeDot:tab.querySelector(".active-dot"),back:[],qam:null,abSwap:null,pad:null,led:null,ledV:null};
     // A/B swap + trackpad haptics toggles
     const tog=document.createElement("div"); tog.className="row";
     tog.innerHTML='<label>A/B + X/Y swap</label>';
@@ -254,6 +254,16 @@ function setTab(et){
       const sel=mkSelect(def,false); row.appendChild(sel); sec.appendChild(row);
       sel.addEventListener("change",()=>setField(40+et*8+4, +sel.value));
       rec.qam=sel; }
+    // LED brightness
+    { const row=document.createElement("div"); row.className="row";
+      const lab=document.createElement("label"); lab.textContent="LED brightness"; row.appendChild(lab);
+      const sl=document.createElement("input"); sl.type="range"; sl.min=0; sl.max=100; sl.step=5; row.appendChild(sl);
+      const vspan=document.createElement("span"); vspan.className="val"; row.appendChild(vspan);
+      function fmtLed(v){ return (+v===0)?"Auto":v+"%"; }
+      sl.addEventListener("input",()=>{ vspan.textContent=fmtLed(sl.value); });
+      sl.addEventListener("change",()=>setField(40+et*8+7, +sl.value));
+      sec.appendChild(row);
+      rec.led=sl; rec.ledV=vspan; }
     host.appendChild(sec); typeEls.push(rec);
   });
   setTab(0);
@@ -467,17 +477,18 @@ function applyBlob(p){
     : "—";
   setSlider("mDiv",mDiv); setSlider("mFric",mFric); setSlider("rumble",rumbleScale);
   $("#persistMode").textContent = persistMode? "on":"off"; $("#persistMode").classList.toggle("active",!!persistMode);
-  // per-type button config (blob v9): 4 types x 7 bytes. readBlob() strips the 2-byte [0xA5][len] header, so
-  // the firmware's payload byte 75 lands at JS index 73 here.
-  if(p.length>=73+TYPE_DEFS.length*7){
+  // per-type button config (blob v10): 4 types x 8 bytes. readBlob() strips the 2-byte [0xA5][len] header, so
+  // the firmware's buffer index 75 lands at JS index 73 here.
+  if(p.length>=73+TYPE_DEFS.length*8){
     const activeEt=etypeForMode(mode);
     typeEls.forEach((rec,et)=>{
-      const q=73+et*7;
-      const back=[p[q],p[q+1],p[q+2],p[q+3]], qam=p[q+4], ab=p[q+5], pad=p[q+6];
+      const q=73+et*8;
+      const back=[p[q],p[q+1],p[q+2],p[q+3]], qam=p[q+4], ab=p[q+5], pad=p[q+6], led=p[q+7];
       rec.back.forEach((sel,i)=>{ if(document.activeElement!==sel) sel.value=back[i]; });
       if(document.activeElement!==rec.qam) rec.qam.value=qam;
       rec.abSwap.textContent=ab?"on":"off"; rec.abSwap.classList.toggle("active",!!ab);
       rec.pad.textContent=pad?"on":"off"; rec.pad.classList.toggle("active",!!pad);
+      if(document.activeElement!==rec.led){ rec.led.value=led; rec.ledV.textContent=(led===0)?"Auto":led+"%"; }
       // dot marks the type matching the current puck mode
       rec.activeDot.style.display = (et===activeEt) ? "" : "none";
     });

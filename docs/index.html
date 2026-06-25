@@ -201,7 +201,7 @@ const TYPE_DEFS = [
 // Which emulated type a USB mode belongs to (mirror of firmware etypeForMode); -1 = puck mode (no type).
 function etypeForMode(m){ switch(m){case 1:return 0; case 2:case 4:return 1; case 6:case 8:return 2; case 5:case 7:return 3; default:return -1;} }
 const BACK_LABELS = ["L4 (back upper-left)","R4 (back upper-right)","L5 (back lower-left)","R5 (back lower-right)"];
-const typeEls = []; // per-type {sec, abSwap, pad, back[4], qam, led, ledV}
+const typeEls = []; // one entry per TYPE_DEFS: {sec, tab, activeDot, back[], qam, abSwap, pad, led, ledV}
 function mkSelect(def, includeNone){
   const sel=document.createElement("select");
   if(includeNone){ const o=document.createElement("option"); o.value=0; o.textContent="— none —"; sel.appendChild(o); }

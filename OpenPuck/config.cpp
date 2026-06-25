@@ -68,7 +68,7 @@ uint8_t g_rumbleScale = 200;
 const uint32_t g_pollUs = POLL_US_DEFAULT;
 
 #define CFG_FILE "/cfg.bin"
-// bumped (ledBright added to TypeCfg): old cfg ignored -> clean defaults on first boot
+// TypeCfg size changed; old flash format is incompatible -> clean defaults on first boot after upgrade
 #define CFG_MAGIC 0xCB
 struct Cfg {
 	uint8_t magic, mode, mDiv, mFric, rsvd0, pollU100, persistMode,

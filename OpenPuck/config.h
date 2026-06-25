@@ -37,14 +37,16 @@
 #define MODE_PS5_GAME 7
 // DS4, CLEAN single-HID (no wake/WebUSB) for game PlayStation classification
 #define MODE_DS4_GAME 8
-#define MODE_MAX 8
+// DualShock 3 (054C:0289) + gyro + haptics -- CLEAN single-HID for PS3 console and DS3 drivers
+#define MODE_PS3 9
+#define MODE_MAX 9
 
 // The two "game" personalities drop the wake-mouse + WebUSB interfaces so the device is a genuine single-HID PS
 // controller (some PC games -- e.g. Fortnite/UE GameInput -- refuse PS classification when extra interfaces are
 // present). Cost: no config panel / host-wake while in these modes; chord back to Steam (back4 + A) for the panel.
 static inline bool modeIsCleanPS(uint8_t m)
 {
-	return m == MODE_PS5_GAME || m == MODE_DS4_GAME;
+	return m == MODE_PS5_GAME || m == MODE_DS4_GAME || m == MODE_PS3;
 }
 
 static inline bool modeIsPuck(uint8_t m)
@@ -76,6 +78,7 @@ static inline uint8_t etypeForMode(uint8_t m)
 		return ET_SWITCH;
 	case MODE_HIDGYRO:
 	case MODE_DS4_GAME:
+	case MODE_PS3:
 		return ET_DS4;
 	case MODE_PS5:
 	case MODE_PS5_GAME:

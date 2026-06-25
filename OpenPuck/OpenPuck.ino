@@ -45,8 +45,10 @@ using namespace Adafruit_LittleFS_Namespace;
 // puck composite (4 HID + WebUSB) exceeds the default 256 B config buffer
 static uint8_t g_usbCfgDesc[512];
 
-// Per-mode USB serial suffix (modes 1..8: X=xbox N=hori L=lizard P=swpro S=ps5 G=hidgyro Q=ps5game D=ds4game).
-static const char MODE_SUFFIX[] = { 'X', 'N', 'L', 'P', 'S', 'G', 'Q', 'D' };
+// Per-mode USB serial suffix (modes 1..9: X=xbox N=hori L=lizard P=swpro S=ps5 G=hidgyro Q=ps5game D=ds4game 3=ps3).
+static const char MODE_SUFFIX[] = {
+	'X', 'N', 'L', 'P', 'S', 'G', 'Q', 'D', '3'
+};
 // Fixed-interface flags captured at boot so usbReenumerate (dynamic mount, no reboot) replays them.
 static bool s_dynWantWebusb = false, s_dynWantWakeMouse = false;
 
@@ -62,11 +64,11 @@ void usbReenumerate(uint8_t k)
 	USBDevice.setConfigurationBuffer(g_usbCfgDesc, sizeof g_usbCfgDesc);
 	g_active->usbIdentity(); // clearConfiguration reset VID/PID/strings -- restore them
 	// serial carries the mounted count so the host invalidates its cached config descriptor on a change
-	snprintf(
-		g_usbSerial, sizeof g_usbSerial, "%s%c%u", g_unit,
-		MODE_SUFFIX[(g_usbMode >= 1 && g_usbMode <= 8) ? g_usbMode - 1 :
-								 0],
-		(unsigned)k);
+	snprintf(g_usbSerial, sizeof g_usbSerial, "%s%c%u", g_unit,
+		 MODE_SUFFIX[(g_usbMode >= 1 && g_usbMode <= MODE_MAX) ?
+				     g_usbMode - 1 :
+				     0],
+		 (unsigned)k);
 	USBDevice.setSerialDescriptor(g_usbSerial);
 	if (s_dynWantWakeMouse)
 		wakeHidAddInterface(); // HID instance 0
@@ -204,7 +206,7 @@ void setup()
 		"SWITCH(horipad)",     "LIZARD(puck kb/mouse)",
 		"SWITCH(pro+gyro)",    "PS5(dualsense)",
 		"HIDGYRO(ds4+motion)", "PS5(dualsense,game/clean)",
-		"DS4(ds4,game/clean)"
+		"DS4(ds4,game/clean)", "PS3(dualshock3+gyro)"
 	};
 	Serial.printf("# copycat up: unit=%s board=%s, mode=%s\n", g_unit,
 		      g_board,

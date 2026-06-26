@@ -9,6 +9,9 @@
 #include <Adafruit_TinyUSB.h>
 #include <stdint.h>
 
-// mdev / kdev may be the same object (puck mode sends to the same HID slot for both reports).
+// Drives the desktop mouse/keyboard from the binding table. Merges input from ALL bonded controllers
+// (g_in[s] for every used slot) onto the one shared mouse/keyboard -- a controller on any RF slot
+// contributes, and multiple controllers drive the same cursor/keys together. mdev/kdev may be the same
+// object (puck mode sends both reports to hid[0]).
 void rfLizard(Adafruit_USBD_HID *mdev, Adafruit_USBD_HID *kdev, uint8_t mrid,
 	      uint8_t krid);

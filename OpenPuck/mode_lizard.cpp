@@ -4,34 +4,17 @@
 #include "config.h"
 #include <string.h>
 
-void rfLizard(Adafruit_USBD_HID *mdev, Adafruit_USBD_HID *kdev, uint8_t mrid,
-	      uint8_t krid)
+// Evaluate the binding table for ONE controller's button word, merging its keyboard/mouse-button/
+// consumer outputs into the shared accumulators. Pulled out of rfLizard so every bonded controller can
+// feed the same outputs. doRpadMouse/doLpadScroll are map-level (set if such a binding exists at all).
+static void lizardEvalSlot(uint32_t buttons, uint8_t &outMod, uint8_t outKeys[6],
+			   uint8_t &nKeys, uint8_t &outMBtn,
+			   uint8_t &consumerBits, bool &doRpadMouse,
+			   bool &doLpadScroll)
 {
-	const PuckInput &in = g_in[0];
-	uint32_t buttons = in.buttons;
-
-	// Append virtual stick-deflection bits so bindings can trigger on stick direction
-	if (in.lx > 12000)
-		buttons |= LZ_BTN_LSTICK_RT;
-	if (in.lx < -12000)
-		buttons |= LZ_BTN_LSTICK_LF;
-	if (in.ly < -12000)
-		buttons |= LZ_BTN_LSTICK_DN;
-	if (in.ly > 12000)
-		buttons |= LZ_BTN_LSTICK_UP;
-
-	// ---- accumulate outputs from the binding table ----
-	uint8_t outMod = 0;
-	uint8_t outKeys[6] = { 0, 0, 0, 0, 0, 0 };
-	uint8_t nKeys = 0;
-	uint8_t outMBtn = 0;
-	bool doRpadMouse = false, doLpadScroll = false;
-	uint8_t consumerBits = 0;
-
-	// kbdConsumed: any trig bits claimed by a hold-modifier binding so that simpler
-	// single-button bindings sharing those bits are suppressed.
+	// kbdConsumed (per controller): trig bits claimed by a hold-modifier binding so simpler
+	// single-button bindings sharing those bits are suppressed for THIS controller.
 	uint32_t kbdConsumed = 0;
-
 	for (uint8_t i = 0; i < g_lizardMap.count; i++) {
 		const LizardBinding &b = g_lizardMap.bindings[i];
 		if (b.outType == LZ_OUT_NONE)
@@ -85,27 +68,82 @@ void rfLizard(Adafruit_USBD_HID *mdev, Adafruit_USBD_HID *kdev, uint8_t mrid,
 			break;
 		}
 	}
+}
+
+// Add the virtual stick-deflection bits so bindings can trigger on left-stick direction.
+static uint32_t lizardButtons(const PuckInput &in)
+{
+	uint32_t buttons = in.buttons;
+	if (in.lx > 12000)
+		buttons |= LZ_BTN_LSTICK_RT;
+	if (in.lx < -12000)
+		buttons |= LZ_BTN_LSTICK_LF;
+	if (in.ly < -12000)
+		buttons |= LZ_BTN_LSTICK_DN;
+	if (in.ly > 12000)
+		buttons |= LZ_BTN_LSTICK_UP;
+	return buttons;
+}
+
+void rfLizard(Adafruit_USBD_HID *mdev, Adafruit_USBD_HID *kdev, uint8_t mrid,
+	      uint8_t krid)
+{
+	// ---- merge binding outputs across every bonded controller ----
+	uint8_t outMod = 0;
+	uint8_t outKeys[6] = { 0, 0, 0, 0, 0, 0 };
+	uint8_t nKeys = 0;
+	uint8_t outMBtn = 0;
+	bool doRpadMouse = false, doLpadScroll = false;
+	uint8_t consumerBits = 0;
+
+	for (int s = 0; s < NSLOT; s++) {
+		if (!g_slot[s].used)
+			continue;
+		lizardEvalSlot(lizardButtons(g_in[s]), outMod, outKeys, nKeys,
+			       outMBtn, consumerBits, doRpadMouse, doLpadScroll);
+	}
 
 	// ---- right pad -> mouse motion with glide ----
-	static int prx = 0, pry = 0;
-	static bool prt = false;
-	static float vx = 0, vy = 0, rmx = 0, rmy = 0;
+	// Per-slot velocity/last-position so each controller's pad integrates independently; the resulting
+	// deltas are SUMMED into one cursor (sub-pixel carry rmx/rmy is shared -- one mouse).
+	static int prx[NSLOT] = { 0 }, pry[NSLOT] = { 0 };
+	static bool prt[NSLOT] = { false };
+	static float vx[NSLOT] = { 0 }, vy[NSLOT] = { 0 }, rmx = 0, rmy = 0;
 	int dx = 0, dy = 0;
 	if (doRpadMouse) {
-		bool rtouch = (buttons & TB_RPADT) != 0;
-		int rx = in.rpx, ry = in.rpy;
-		if (rtouch && prt) {
-			vx += (rx - prx);
-			vy += (ry - pry);
+		float sumx = 0, sumy = 0;
+		float f = g_mFric / 100.0f;
+		for (int s = 0; s < NSLOT; s++) {
+			if (!g_slot[s].used) {
+				vx[s] = vy[s] = 0;
+				prt[s] = false;
+				continue;
+			}
+			const PuckInput &in = g_in[s];
+			bool rtouch = (in.buttons & TB_RPADT) != 0;
+			int rx = in.rpx, ry = in.rpy;
+			if (rtouch && prt[s]) {
+				vx[s] += (rx - prx[s]);
+				vy[s] += (ry - pry[s]);
+			}
+			if (rtouch) {
+				prx[s] = rx;
+				pry[s] = ry;
+			}
+			prt[s] = rtouch;
+			sumx += vx[s];
+			sumy += vy[s];
+			// friction = glide/decay (per slot)
+			vx[s] *= f;
+			vy[s] *= f;
+			if (vx[s] > -1 && vx[s] < 1)
+				vx[s] = 0;
+			if (vy[s] > -1 && vy[s] < 1)
+				vy[s] = 0;
 		}
-		if (rtouch) {
-			prx = rx;
-			pry = ry;
-		}
-		prt = rtouch;
 		// Y inverted; *10 = desktop cursor sensitivity (g_mDiv 64 -> eff 640)
-		float mxf = vx / (float)(g_mDiv * 10) + rmx,
-		      myf = -(vy / (float)(g_mDiv * 10)) + rmy;
+		float mxf = sumx / (float)(g_mDiv * 10) + rmx,
+		      myf = -(sumy / (float)(g_mDiv * 10)) + rmy;
 		dx = (int)mxf;
 		dy = (int)myf;
 		rmx = mxf - dx;
@@ -118,30 +156,34 @@ void rfLizard(Adafruit_USBD_HID *mdev, Adafruit_USBD_HID *kdev, uint8_t mrid,
 			dy = 127;
 		if (dy < -127)
 			dy = -127;
-		float f = g_mFric / 100.0f;
-		vx *= f;
-		vy *= f;
-		if (vx > -1 && vx < 1)
-			vx = 0;
-		if (vy > -1 && vy < 1)
-			vy = 0;
 	}
 
 	// ---- left pad -> scroll wheel ----
-	static int ply = 0;
-	static bool plt = false;
+	// Per-slot last-position; accumulator shared (one wheel). Reset only when NO controller is scrolling.
+	static int ply[NSLOT] = { 0 };
+	static bool plt[NSLOT] = { false };
 	static float sacc = 0;
 	int dw = 0;
 	if (doLpadScroll) {
-		bool ltouch = (buttons & TB_LPADT) != 0;
-		int ly = in.lpy;
-		if (ltouch && plt)
-			sacc += (ly - ply) / (float)(g_mDiv * 24);
-		if (ltouch)
-			ply = ly;
-		else
+		bool anyTouch = false;
+		for (int s = 0; s < NSLOT; s++) {
+			if (!g_slot[s].used) {
+				plt[s] = false;
+				continue;
+			}
+			const PuckInput &in = g_in[s];
+			bool ltouch = (in.buttons & TB_LPADT) != 0;
+			int ly = in.lpy;
+			if (ltouch && plt[s])
+				sacc += (ly - ply[s]) / (float)(g_mDiv * 24);
+			if (ltouch) {
+				ply[s] = ly;
+				anyTouch = true;
+			}
+			plt[s] = ltouch;
+		}
+		if (!anyTouch)
 			sacc = 0;
-		plt = ltouch;
 		dw = (int)sacc;
 		sacc -= dw;
 		if (dw > 15)
@@ -184,7 +226,7 @@ void rfLizard(Adafruit_USBD_HID *mdev, Adafruit_USBD_HID *kdev, uint8_t mrid,
 		pmod = outMod;
 		for (int i = 0; i < 6; i++)
 			pkc[i] = outKeys[i];
-		uint8_t krep[8] = { outMod,    0,	    outKeys[0],
+		uint8_t krep[8] = { outMod,	0,	    outKeys[0],
 				    outKeys[1], outKeys[2], outKeys[3],
 				    outKeys[4], outKeys[5] };
 		if (kdev->ready())

@@ -16,6 +16,7 @@
 
 #include "Adafruit_TinyUSB.h"
 #include "usb_identity.h"
+#include "config.h"
 
 LOG_MODULE_REGISTER(opk_usbd, LOG_LEVEL_INF);
 
@@ -143,29 +144,57 @@ static int do_setup(void)
 	// the board CDC console = cdc_acm_0, plus our opk_webusb_0 / opk_xinput_0.
 	static const char *const HIDN[] = { "hid_0", "hid_1", "hid_2", "hid_3",
 					    "hid_4" };
-	const char *block[8];
-	int bi = 0;
-	int hc = opk_hid_claimed();
-	for (int i = hc; i < 5; i++)
-		block[bi++] = HIDN[i]; // unused HID pool nodes
-	// The nRF52840 USBD has only 7 usable IN endpoints (EP1..7) beyond EP0.
-	// Puck mode already uses 5 HID IN (wake + 4 slots); adding WebUSB (1) + CDC
-	// (2) overflows to 8. For now drop WebUSB and keep the CDC console (5 HID +
-	// 2 CDC = 7) — the console is the only bring-up observability on this board.
-	block[bi++] = "opk_webusb_0";
-	if (!opk_want_webusb())
-		block[bi++] = "cdc_acm_0"; // clean-PS: single HID only, no CDC
-	if (!opk_xinput_want())
-		block[bi++] = "opk_xinput_0";
-	block[bi] = NULL;
 
-	err = usbd_register_all_classes(&opk_usbd, USBD_SPEED_FS, 1, block);
-	if (err) {
-		LOG_ERR("register classes failed (%d)", err);
-		return err;
+	if (modeIsPuck(g_usbMode)) {
+		// Steam/SDL's Proteus driver binds the four bond-slot HIDs on USB
+		// interfaces 2..5. The shim claims HID nodes in begin() order:
+		// hid_0 = wake mouse, hid_1..hid_4 = the four slots. Register CDC
+		// first (interfaces 0,1) then the four slot HIDs (interfaces 2..5)
+		// in explicit order so the slots land exactly where Steam expects.
+		// (Diagnostic layout: keeps the CDC console; drops the wake mouse +
+		// WebUSB to fit the slots at 2..5 and stay within 7 IN endpoints.)
+		int err2 = usbd_register_class(&opk_usbd, "cdc_acm_0",
+					       USBD_SPEED_FS, 1);
+		if (err2)
+			LOG_WRN("cdc register (%d)", err2);
+		for (int i = 1; i <= 4; i++) {
+			err = usbd_register_class(&opk_usbd, HIDN[i],
+						  USBD_SPEED_FS, 1);
+			if (err) {
+				LOG_ERR("slot %s register failed (%d)",
+					HIDN[i], err);
+				return err;
+			}
+		}
+	} else {
+		const char *block[8];
+		int bi = 0;
+		int hc = opk_hid_claimed();
+		for (int i = hc; i < 5; i++)
+			block[bi++] = HIDN[i]; // unused HID pool nodes
+		block[bi++] = "opk_webusb_0";
+		if (!opk_want_webusb())
+			block[bi++] = "cdc_acm_0";
+		if (!opk_xinput_want())
+			block[bi++] = "opk_xinput_0";
+		block[bi] = NULL;
+		err = usbd_register_all_classes(&opk_usbd, USBD_SPEED_FS, 1,
+						block);
+		if (err) {
+			LOG_ERR("register classes failed (%d)", err);
+			return err;
+		}
 	}
 
-	usbd_device_set_code_triple(&opk_usbd, USBD_SPEED_FS, 0, 0, 0);
+	// A composite that includes CDC ACM needs the Interface Association
+	// Descriptor, signalled by the Miscellaneous/0x02/0x01 device code triple;
+	// otherwise the host may not bind the CDC ACM (no serial port). Puck mode
+	// includes CDC; clean single-HID modes use the zero triple.
+	if (modeIsPuck(g_usbMode))
+		usbd_device_set_code_triple(&opk_usbd, USBD_SPEED_FS,
+					    USB_BCC_MISCELLANEOUS, 0x02, 0x01);
+	else
+		usbd_device_set_code_triple(&opk_usbd, USBD_SPEED_FS, 0, 0, 0);
 
 	// WebUSB BOS (browser discovers the vendor interface); best-effort.
 	(void)usbd_device_set_bcd_usb(&opk_usbd, USBD_SPEED_FS, 0x0210);

@@ -22,7 +22,9 @@ target_sources(app PRIVATE
   # compatibility layer
   src/compat/arduino_compat.cpp
   src/compat/littlefs_shim.cpp
-  src/compat/usb_stub.cpp        # inert USB backing (swap for usb_glue.cpp)
+  src/compat/serial_cdc_glue.cpp
+  src/compat/usb_glue.cpp           # Zephyr USBD backing for the TinyUSB shim
+  src/compat/usb_device_setup.cpp   # usbd_context (HID pool + CDC) bring-up
 
   # ported firmware modules
   src/config.cpp

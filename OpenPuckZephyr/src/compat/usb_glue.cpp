@@ -9,8 +9,8 @@
 // (device state, HID submit/callbacks) are functional; the WebUSB vendor pipe
 // and the XInput custom class are scaffolded to compile and are completed in
 // their own glue units (see usb_webusb_glue / mode_xinput port).
-#include "Adafruit_TinyUSB.h"
-
+// Zephyr USB headers FIRST so their HID enums/keys are defined; the shim header
+// then suppresses its duplicate definitions via the matching include guards.
 #include <zephyr/usb/usbd.h>
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/usb/class/usbd_hid.h>
@@ -18,6 +18,9 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <string.h>
+
+#include "Adafruit_TinyUSB.h"
 
 // ---- device state, updated from the USBD message callback ----
 static atomic_t s_mounted = ATOMIC_INIT(0);
@@ -213,37 +216,37 @@ bool Adafruit_USBD_HID::sendReport(uint8_t report_id, const void *report,
 #include "usb_identity.h"
 opk_usb_identity g_opk_usb_id;
 
-void TinyUSBDevice::setID(uint16_t vid, uint16_t pid)
+void Adafruit_USBD_Device::setID(uint16_t vid, uint16_t pid)
 {
 	g_opk_usb_id.vid = vid;
 	g_opk_usb_id.pid = pid;
 }
-void TinyUSBDevice::setVersion(uint16_t bcd)
+void Adafruit_USBD_Device::setVersion(uint16_t bcd)
 {
 	g_opk_usb_id.bcd_usb = bcd;
 }
-void TinyUSBDevice::setDeviceVersion(uint16_t bcd)
+void Adafruit_USBD_Device::setDeviceVersion(uint16_t bcd)
 {
 	g_opk_usb_id.bcd_device = bcd;
 }
-void TinyUSBDevice::setManufacturerDescriptor(const char *s)
+void Adafruit_USBD_Device::setManufacturerDescriptor(const char *s)
 {
 	g_opk_usb_id.manufacturer = s;
 }
-void TinyUSBDevice::setProductDescriptor(const char *s)
+void Adafruit_USBD_Device::setProductDescriptor(const char *s)
 {
 	g_opk_usb_id.product = s;
 }
-void TinyUSBDevice::setSerialDescriptor(const char *s)
+void Adafruit_USBD_Device::setSerialDescriptor(const char *s)
 {
 	g_opk_usb_id.serial = s;
 }
-void TinyUSBDevice::setConfigurationBuffer(uint8_t *buf, uint32_t buflen)
+void Adafruit_USBD_Device::setConfigurationBuffer(uint8_t *buf, uint32_t buflen)
 {
 	(void)buf;
 	(void)buflen; // Zephyr builds its own descriptor set
 }
-void TinyUSBDevice::setConfigurationAttribute(uint8_t attr)
+void Adafruit_USBD_Device::setConfigurationAttribute(uint8_t attr)
 {
 	g_opk_usb_id.cfg_attr = attr;
 }
@@ -251,24 +254,24 @@ void TinyUSBDevice::setConfigurationAttribute(uint8_t attr)
 // Interface/endpoint allocation + dynamic add: the Zephyr descriptor set is
 // fixed at init, so these are recorded for the XInput class glue and are no-ops
 // against the live stack (see the reboot-to-reenumerate concession).
-uint8_t TinyUSBDevice::allocInterface(uint8_t count)
+uint8_t Adafruit_USBD_Device::allocInterface(uint8_t count)
 {
 	uint8_t base = g_opk_usb_id.next_itf;
 	g_opk_usb_id.next_itf += count;
 	return base;
 }
-uint8_t TinyUSBDevice::allocEndpoint(uint8_t dir)
+uint8_t Adafruit_USBD_Device::allocEndpoint(uint8_t dir)
 {
 	uint8_t n = ++g_opk_usb_id.next_ep;
 	return (dir ? 0x80 : 0x00) | n;
 }
-bool TinyUSBDevice::addInterface(Adafruit_USBD_Interface &itf)
+bool Adafruit_USBD_Device::addInterface(Adafruit_USBD_Interface &itf)
 {
 	(void)itf;
 	return true;
 }
 
-void TinyUSBDevice::clearConfiguration()
+void Adafruit_USBD_Device::clearConfiguration()
 {
 	s_hid_claimed = 0;
 	g_opk_usb_id.next_itf = 0;
@@ -276,23 +279,23 @@ void TinyUSBDevice::clearConfiguration()
 }
 
 // detach/attach map to disabling/enabling the usbd stack (opk_usbd_*, above).
-bool TinyUSBDevice::detach()
+bool Adafruit_USBD_Device::detach()
 {
 	return opk_usbd_disable() == 0;
 }
-bool TinyUSBDevice::attach()
+bool Adafruit_USBD_Device::attach()
 {
 	return opk_usbd_enable() == 0;
 }
-bool TinyUSBDevice::mounted()
+bool Adafruit_USBD_Device::mounted()
 {
 	return opk_usb_mounted();
 }
-bool TinyUSBDevice::suspended()
+bool Adafruit_USBD_Device::suspended()
 {
 	return opk_usb_suspended();
 }
-bool TinyUSBDevice::remoteWakeup()
+bool Adafruit_USBD_Device::remoteWakeup()
 {
 	struct usbd_context *ctx = opk_usbd_ctx();
 	if (!ctx)
@@ -300,7 +303,8 @@ bool TinyUSBDevice::remoteWakeup()
 	return usbd_wakeup_request(ctx) == 0;
 }
 
-TinyUSBDevice USBDevice;
+Adafruit_USBD_Device USBDevice;
+Adafruit_USBD_Device &TinyUSBDevice = USBDevice;
 
 // USBD message callback: track mount/suspend. Registered by usb_device_setup.
 extern "C" void opk_usb_msg(const enum usbd_msg_type type)
@@ -321,4 +325,76 @@ extern "C" void opk_usb_msg(const enum usbd_msg_type type)
 	default:
 		break;
 	}
+}
+
+// ===================== WebUSB (vendor) =====================
+// Scaffolded inert: the WebUSB vendor pipe needs a Zephyr custom vendor class +
+// BOS/MS-OS-2.0 descriptors (the config panel won't connect until then). The
+// firmware tolerates connected()==false (it simply skips the panel).
+Adafruit_USBD_WebUSB::Adafruit_USBD_WebUSB()
+{
+}
+bool Adafruit_USBD_WebUSB::begin()
+{
+	return true;
+}
+bool Adafruit_USBD_WebUSB::connected()
+{
+	return false;
+}
+int Adafruit_USBD_WebUSB::available()
+{
+	return 0;
+}
+int Adafruit_USBD_WebUSB::read()
+{
+	return -1;
+}
+uint32_t Adafruit_USBD_WebUSB::write(const void *, uint32_t n)
+{
+	return n;
+}
+void Adafruit_USBD_WebUSB::flush()
+{
+}
+
+// ===================== DFU entry =====================
+#include "Arduino.h"
+void enterUf2Dfu(void)
+{
+	NRF_POWER->GPREGRET = 0x57; // Adafruit bootloader: UF2 mass-storage
+	NVIC_SystemReset();
+}
+void enterSerialDfu(void)
+{
+	NRF_POWER->GPREGRET = 0x4E; // Adafruit bootloader: serial (OTA) DFU
+	NVIC_SystemReset();
+}
+
+// ===================== XInput custom-class endpoint stubs =====================
+// XInput needs a real Zephyr custom USBD class to enumerate (see mode_xinput).
+// These keep the class driver's report logic compiling/inert until then.
+#include "device/usbd_pvt.h"
+extern "C" bool tud_mounted(void)
+{
+	return opk_usb_mounted();
+}
+bool usbd_edpt_open(uint8_t, const tusb_desc_endpoint_t *)
+{
+	return false;
+}
+bool usbd_edpt_xfer(uint8_t, uint8_t, uint8_t *, uint16_t)
+{
+	return false;
+}
+bool usbd_edpt_busy(uint8_t, uint8_t)
+{
+	return false;
+}
+bool usbd_edpt_claim(uint8_t, uint8_t)
+{
+	return false;
+}
+void usbd_edpt_release(uint8_t, uint8_t)
+{
 }

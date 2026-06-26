@@ -79,6 +79,9 @@ typedef struct __attribute__((packed)) {
 } hid_mouse_report_t;
 
 // ---- HID keyboard usage IDs (lizard keyboard map) ----
+// Guarded against Zephyr's <zephyr/usb/class/hid.h>, which defines the same
+// standard usage IDs; in TUs that pull in both, Zephyr's win (identical values).
+#ifndef ZEPHYR_INCLUDE_USB_CLASS_HID_H_
 enum {
 	HID_KEY_NONE = 0x00,
 	HID_KEY_A = 0x04,
@@ -94,6 +97,7 @@ enum {
 	HID_KEY_ARROW_DOWN = 0x51,
 	HID_KEY_ARROW_UP = 0x52,
 };
+#endif
 
 // ---- packed descriptor structs used by the XInput class ----
 typedef struct __attribute__((packed)) {

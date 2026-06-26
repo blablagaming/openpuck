@@ -1,0 +1,59 @@
+/*
+ * OpenPuck USB device topology for the Zephyr USBD stack.
+ *
+ * The TinyUSB shim binds Adafruit_USBD_HID objects to this pool of HID device
+ * nodes in begin() order (see usb_glue.cpp). The puck mode needs the most: a
+ * wake mouse + four bond-slot HID interfaces = 5. The board already declares a
+ * CDC ACM console (board_cdc_acm_uart) on zephyr_udc0, which usbd_register_all_
+ * classes picks up; serial_console is wired to it.
+ *
+ * in-report-size 64 covers the largest puck HID report; 1 ms polling matches the
+ * ~250 Hz+ RF cadence (the RF link, not USB, is the rate limit).
+ */
+/ {
+	hid_dev_0: hid_dev_0 {
+		compatible = "zephyr,hid-device";
+		label = "OPK_HID0";
+		protocol-code = "none";
+		in-polling-period-us = <1000>;
+		in-report-size = <64>;
+		out-polling-period-us = <1000>;
+		out-report-size = <64>;
+	};
+	hid_dev_1: hid_dev_1 {
+		compatible = "zephyr,hid-device";
+		label = "OPK_HID1";
+		protocol-code = "none";
+		in-polling-period-us = <1000>;
+		in-report-size = <64>;
+		out-polling-period-us = <1000>;
+		out-report-size = <64>;
+	};
+	hid_dev_2: hid_dev_2 {
+		compatible = "zephyr,hid-device";
+		label = "OPK_HID2";
+		protocol-code = "none";
+		in-polling-period-us = <1000>;
+		in-report-size = <64>;
+		out-polling-period-us = <1000>;
+		out-report-size = <64>;
+	};
+	hid_dev_3: hid_dev_3 {
+		compatible = "zephyr,hid-device";
+		label = "OPK_HID3";
+		protocol-code = "none";
+		in-polling-period-us = <1000>;
+		in-report-size = <64>;
+		out-polling-period-us = <1000>;
+		out-report-size = <64>;
+	};
+	hid_dev_4: hid_dev_4 {
+		compatible = "zephyr,hid-device";
+		label = "OPK_HID4";
+		protocol-code = "none";
+		in-polling-period-us = <1000>;
+		in-report-size = <64>;
+		out-polling-period-us = <1000>;
+		out-report-size = <64>;
+	};
+};

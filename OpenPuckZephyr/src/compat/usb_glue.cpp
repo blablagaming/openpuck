@@ -328,9 +328,13 @@ extern "C" void opk_usb_msg(const enum usbd_msg_type type)
 }
 
 // ===================== WebUSB (vendor) =====================
-// Scaffolded inert: the WebUSB vendor pipe needs a Zephyr custom vendor class +
-// BOS/MS-OS-2.0 descriptors (the config panel won't connect until then). The
-// firmware tolerates connected()==false (it simply skips the panel).
+// Backed by the Zephyr custom vendor class in usb_webusb_class.cpp.
+extern "C" bool opk_webusb_connected(void);
+extern "C" int opk_webusb_available(void);
+extern "C" int opk_webusb_read(void);
+extern "C" uint32_t opk_webusb_write(const void *data, uint32_t n);
+extern "C" void opk_webusb_flush(void);
+
 Adafruit_USBD_WebUSB::Adafruit_USBD_WebUSB()
 {
 }
@@ -340,22 +344,23 @@ bool Adafruit_USBD_WebUSB::begin()
 }
 bool Adafruit_USBD_WebUSB::connected()
 {
-	return false;
+	return opk_webusb_connected();
 }
 int Adafruit_USBD_WebUSB::available()
 {
-	return 0;
+	return opk_webusb_available();
 }
 int Adafruit_USBD_WebUSB::read()
 {
-	return -1;
+	return opk_webusb_read();
 }
-uint32_t Adafruit_USBD_WebUSB::write(const void *, uint32_t n)
+uint32_t Adafruit_USBD_WebUSB::write(const void *data, uint32_t n)
 {
-	return n;
+	return opk_webusb_write(data, n);
 }
 void Adafruit_USBD_WebUSB::flush()
 {
+	opk_webusb_flush();
 }
 
 // ===================== DFU entry =====================

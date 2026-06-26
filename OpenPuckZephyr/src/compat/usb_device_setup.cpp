@@ -7,6 +7,9 @@
 // through the shim (g_opk_usb_id) are applied here just before enable.
 #include <zephyr/usb/usbd.h>
 #include <zephyr/usb/usb_device.h>
+#include <zephyr/usb/bos.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/net_buf.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/logging/log.h>
@@ -27,6 +30,64 @@ USBD_DESC_PRODUCT_DEFINE(opk_product, "OpenPuck");
 USBD_DESC_SERIAL_NUMBER_DEFINE(opk_sn);
 
 USBD_DESC_CONFIG_DEFINE(opk_fs_cfg_desc, "OpenPuck FS");
+
+// ---- WebUSB platform capability (BOS) + landing-page URL ----
+// Lets a browser discover the vendor interface (usb_webusb_class.cpp). The URL
+// is served via the WebUSB vendor request.
+#define OPK_WEBUSB_VENDOR_CODE 0x01U
+#define OPK_WEBUSB_LANDING 0x01U
+#define WEBUSB_REQ_GET_URL 0x02U
+#define WEBUSB_DESC_TYPE_URL 0x03U
+
+struct opk_bos_webusb {
+	struct usb_bos_platform_descriptor platform;
+	struct usb_bos_capability_webusb cap;
+} __packed;
+
+static const struct opk_bos_webusb opk_bos_webusb = {
+	.platform = {
+		.bLength = sizeof(struct usb_bos_platform_descriptor) +
+			   sizeof(struct usb_bos_capability_webusb),
+		.bDescriptorType = USB_DESC_DEVICE_CAPABILITY,
+		.bDevCapabilityType = USB_BOS_CAPABILITY_PLATFORM,
+		.bReserved = 0,
+		.PlatformCapabilityUUID = {
+			0x38, 0xB6, 0x08, 0x34, 0xA9, 0x09, 0xA0, 0x47,
+			0x8B, 0xFD, 0xA0, 0x76, 0x88, 0x15, 0xB6, 0x65,
+		},
+	},
+	.cap = {
+		.bcdVersion = sys_cpu_to_le16(0x0100),
+		.bVendorCode = OPK_WEBUSB_VENDOR_CODE,
+		.iLandingPage = OPK_WEBUSB_LANDING,
+	},
+};
+
+// Landing page (the browser config panel). UTF-8, scheme byte 0x01 = https.
+static const uint8_t opk_webusb_url[] = {
+	0x16, WEBUSB_DESC_TYPE_URL, 0x01,
+	'o', 'p', 'e', 'n', 'p', 'u', 'c', 'k', '.', 'l', 'o', 'c', 'a', 'l',
+	'/', 'p', 'a', 'n', 'e', 'l',
+};
+
+static int webusb_to_host(const struct usbd_context *const ctx,
+			  const struct usb_setup_packet *const setup,
+			  struct net_buf *const buf)
+{
+	(void)ctx;
+	if (setup->wIndex == WEBUSB_REQ_GET_URL &&
+	    USB_GET_DESCRIPTOR_INDEX(setup->wValue) == OPK_WEBUSB_LANDING) {
+		net_buf_add_mem(buf, opk_webusb_url,
+				MIN(net_buf_tailroom(buf),
+				    sizeof(opk_webusb_url)));
+		return 0;
+	}
+	return -ENOTSUP;
+}
+
+USBD_DESC_BOS_VREQ_DEFINE(opk_bos_vreq_webusb, sizeof(opk_bos_webusb),
+			  &opk_bos_webusb, OPK_WEBUSB_VENDOR_CODE, webusb_to_host,
+			  NULL);
 
 // Bus-powered + remote-wakeup (the firmware always arms remote wakeup).
 static const uint8_t opk_attr = USB_SCD_REMOTE_WAKEUP;
@@ -70,6 +131,12 @@ static int do_setup(void)
 	}
 
 	usbd_device_set_code_triple(&opk_usbd, USBD_SPEED_FS, 0, 0, 0);
+
+	// WebUSB BOS (browser discovers the vendor interface); best-effort.
+	(void)usbd_device_set_bcd_usb(&opk_usbd, USBD_SPEED_FS, 0x0210);
+	if (usbd_add_descriptor(&opk_usbd, &opk_bos_vreq_webusb))
+		LOG_WRN("WebUSB BOS add failed");
+
 	usbd_msg_register_cb(&opk_usbd, msg_cb);
 	s_setup_done = true;
 	return 0;

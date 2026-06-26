@@ -16,6 +16,12 @@ target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/src/compat)
 
+# status_led uses Arduino logical pin numbers; under the absolute-nRF-pin
+# digitalWrite shim, the SuperMini's P0.15 blue LED is absolute pin 15 (the
+# header's default 24 is the Adafruit logical pin). LED_BUILTIN (P1.15 = 47) is
+# set in the Arduino.h shim.
+target_compile_definitions(app PRIVATE WAKE_LED_PIN_B=15)
+
 target_sources(app PRIVATE
   src/main.cpp
 
@@ -25,6 +31,7 @@ target_sources(app PRIVATE
   src/compat/serial_cdc_glue.cpp
   src/compat/usb_glue.cpp           # Zephyr USBD backing for the TinyUSB shim
   src/compat/usb_device_setup.cpp   # usbd_context (HID pool + CDC) bring-up
+  src/compat/usb_webusb_class.cpp   # WebUSB vendor class (config panel pipe)
 
   # ported firmware modules
   src/config.cpp

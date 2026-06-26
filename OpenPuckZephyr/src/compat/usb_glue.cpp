@@ -112,7 +112,17 @@ static int op_set_report(const struct device *dev, const uint8_t type,
 	int i = pool_index(dev);
 	if (i < 0 || !s_hid_owner[i] || !s_hid_owner[i]->_set_cb)
 		return -ENOTSUP;
-	s_hid_owner[i]->_set_cb(id, type, buf, len);
+	// TinyUSB delivers the SET_REPORT payload WITHOUT the report ID; the
+	// macOS/Zephyr control path leaves the ID as buf[0]. Strip it so the puck
+	// command parser sees b[0]=command (else every command is off-by-one and
+	// Steam's pairing/bond commands are misparsed).
+	const uint8_t *payload = buf;
+	uint16_t plen = len;
+	if (id != 0 && plen >= 1 && buf[0] == id) {
+		payload++;
+		plen--;
+	}
+	s_hid_owner[i]->_set_cb(id, type, payload, plen);
 	return 0;
 }
 

@@ -41,7 +41,11 @@ extern "C" int opk_serial_read(void)
 
 extern "C" int opk_serial_avail_write(void)
 {
-	return 64;
+	// The firmware gates its diagnostic prints on availableForWrite() > 80/90.
+	// Report a generous CDC TX budget so those logs are not suppressed (the
+	// underlying uart_poll_out drops bytes when the host isn't draining, so
+	// over-reporting can't wedge the loop).
+	return 256;
 }
 
 extern "C" size_t opk_serial_write(uint8_t b)

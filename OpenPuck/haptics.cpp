@@ -341,11 +341,29 @@ void rfConnQueueHapticRelay()
 void rfConnFlushRelay(uint8_t ch, uint8_t s1)
 {
 	int cur = (g_curSlot >= 0 && g_curSlot < NSLOT) ? g_curSlot : 0;
+	// Snapshot one entry under a short critical section. relayEnqueue() (the producer) runs on the
+	// high-priority usbd task and, when the ring is full, evicts the oldest by advancing g_rqTail itself --
+	// the same variable this consumer reads/advances. Reading the entry while a producer could overwrite it
+	// is a torn read (and dual-writing g_rqTail desyncs head/tail), so copy the entry out and consume the
+	// slot atomically here, then do the (slow) RF TX on the copy with interrupts enabled.
+	RelayMsg msg;
+	bool have = false;
+	uint32_t pm = __get_PRIMASK();
+	__disable_irq();
 	while (g_rqTail[cur] != g_rqHead[cur]) {
 		RelayMsg &m = g_rq[cur][g_rqTail[cur]];
-
+		g_rqTail[cur] = rqNext(g_rqTail[cur]); // consume the slot
 		// rid 0 = entry voided by hapticCancelPendingOn -> skip
 		if (m.rid) {
+			msg = m; // copy out before the producer can reuse the slot
+			have = true;
+			break;
+		}
+	}
+	__set_PRIMASK(pm);
+	if (have) {
+		RelayMsg &m = msg;
+		{
 			uint8_t rl = m.len;
 			if (rl > RELAY_MAXP)
 				rl = RELAY_MAXP;
@@ -377,14 +395,11 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1)
 				plen = (uint8_t)(4 + rl);
 			}
 			hapLogAdd(0xFE, m.rid, m.data, rl);
-			// release slot before TX
-			g_rqTail[cur] = rqNext(g_rqTail[cur]);
+			// slot was already consumed under the critical section above.
 			// s1 carries a PID distinct from the GET poll (caller cycles it) so the controller's ESB
 			// dedup never treats the GET as a retransmit of this relay. 80us RX: relay is NO-ACK.
-			rfConnTx(ch, s1, p, plen, 80);
-			return; // one relay per poll cycle
+			rfConnTx(ch, s1, p, plen, 80); // one relay per poll cycle
 		}
-		g_rqTail[cur] = rqNext(g_rqTail[cur]);
 	}
 }
 

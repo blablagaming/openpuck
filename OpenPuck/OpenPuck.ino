@@ -43,6 +43,20 @@ using namespace Adafruit_LittleFS_Namespace;
 #error "build with -DCFG_TUD_HID=4 (extra_flags): up to 4 HID interfaces per mode"
 #endif
 
+// The TinyUSB device-stack event queue (_usbd_q) defaults to 16 entries. tud_task() runs in the dedicated
+// high-priority "usbd" FreeRTOS task, but this firmware emits HID reports from the LOW-priority loop() task
+// (every mode: 0x45 forwards, per-slot 0x79/0x7B/0x43 status, streamed gamepad reports). A cross-task
+// sendReport whose EasyDMA is momentarily busy takes TinyUSB's usbd_defer_func() path, which does a BLOCKING
+// osal_queue_send (xQueueSendToBack WAIT_FOREVER) onto _usbd_q. Under a comms burst (haptics/trackpad floods,
+// the connect-time re-init storm, 4 slots at once) the 16-deep queue saturates; the loop task then blocks
+// posting to it and stops feeding the ~8 s watchdog -> the MCU resets and the controller "disconnects". A
+// deeper queue absorbs realistic bursts so the loop never blocks. Must be set on the build command (it is a
+// TinyUSB-internal #ifndef default, so a sketch header cannot reach usbd.c) -- enforce it here so a build that
+// omits the flag fails loudly instead of shipping the deadlock.
+#if !defined(CFG_TUD_TASK_QUEUE_SZ) || CFG_TUD_TASK_QUEUE_SZ < 32
+#error "build with -DCFG_TUD_TASK_QUEUE_SZ=64 (extra_flags): the default 16-deep usbd event queue deadlocks the loop task under comms load -> watchdog reset"
+#endif
+
 // puck composite (4 HID + WebUSB) exceeds the default 256 B config buffer
 static uint8_t g_usbCfgDesc[512];
 

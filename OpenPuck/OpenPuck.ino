@@ -217,6 +217,7 @@ void setup()
 	// Route all device->host HID sends through the usbd task (SOF drain) so loop() never calls tud_* directly
 	// -> the cross-task blocking-defer that deadlocked the loop under comms load can no longer happen.
 	usbTxBegin();
+	webusbInit(); // also drain the WebUSB status blob from the usbd task (its flush() can block loop() too)
 	hapticInit();
 	static const char *MODE_NAME[] = {
 		"STEAM(puck)",	       "XBOX(xinput+mouse)",

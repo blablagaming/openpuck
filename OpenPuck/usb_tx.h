@@ -31,8 +31,10 @@ void usbTxBegin(void);
 // Drain pending reports (one ready report per destination per call). usbd-task only -- invoked by tud_sof_cb.
 void usbTxDrain(void);
 
-// usbd-task drain hook for senders that don't go through Adafruit_USBD_HID (the XInput custom-class endpoint).
-// tud_sof_cb calls this right after usbTxDrain(), on the usbd task. A weak no-op default lives in usb_tx.cpp;
-// mode_xinput overrides it to flush its raw IN endpoints, so its gamepad report is also issued off the loop
-// task. extern "C" so the override links regardless of translation unit.
-extern "C" void usbTxDrainHook(void);
+// Register a callback to run every USB frame ON THE usbd TASK (from tud_sof_cb, right after usbTxDrain()).
+// This is how senders that DON'T go through Adafruit_USBD_HID get their transmits off the loop task too:
+//   - mode_xinput flushes its raw custom-class IN endpoints;
+//   - webusb_config sends the status blob (its usb_web.flush() can otherwise block the loop on a full queue).
+// Call once at setup() (before usbTxBegin()). Safe no-op if usb isn't up yet. Capacity is small + fixed.
+typedef void (*usbTxDrainFn)(void);
+void usbTxRegisterDrain(usbTxDrainFn fn);

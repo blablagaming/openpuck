@@ -7,10 +7,17 @@
 #include "triton.h" // g_in raw IMU (diagnostic readout)
 #include "build_info.h"
 #include "fault_diag.h"
+#include "usb_tx.h"
 #include <Arduino.h>
 #include <string.h>
 
 Adafruit_USBD_WebUSB usb_web;
+
+// Panel-blob send is deferred to the usbd task: webusbPoll() (loop) just sets this, and webusbSofDrain()
+// (registered with usb_tx, runs from tud_sof_cb on the usbd task) does the actual write+flush. usb_web.flush()
+// goes through the same blocking osd_queue_send path as HID sends, so doing it from loop() could stall the
+// loop and trip the watchdog under load -- with the panel open during heavy use that was a live risk.
+static volatile bool g_blobRequest = false;
 
 // blob payload = [ver=10][mode][mDiv][mFric][qamMap(active)][abSwap(active)][back0..3(active)][connSlot(0xFF=none)][linkUp]
 //                [f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub][fwdNewOnly]
@@ -145,6 +152,22 @@ static void webusbSendBlob()
 	usb_web.write(p, sizeof p);
 	usb_web.flush();
 }
+
+// Runs on the usbd task (registered via usbTxRegisterDrain -> tud_sof_cb). Sends the blob if loop() asked for
+// one. Keeps every usb_web write/flush off the loop task so it can't block on the device event queue.
+static void webusbSofDrain(void)
+{
+	if (g_blobRequest) {
+		g_blobRequest = false;
+		webusbSendBlob();
+	}
+}
+// Register the SOF drain. Call once from setup() (harmless even if WebUSB isn't enumerated -- webusbSendBlob
+// no-ops while disconnected, and g_blobRequest is only ever set by panel traffic, which needs a connection).
+void webusbInit(void)
+{
+	usbTxRegisterDrain(webusbSofDrain);
+}
 #if OPK_LOG
 // Stream the capture ring (haptics / relayed host commands) to the panel as 0xA6 frames. Frame formats:
 //   entry: [0xA6][L][T=1][age u32 LE][slot][rid][n][bytes n]   (L = 8 + n)
@@ -219,7 +242,8 @@ void webusbPoll()
 			if (n < need)
 				break; // wait for more bytes
 			if (op == 0x01) {
-				webusbSendBlob();
+				g_blobRequest =
+					true; // sent from the usbd task (webusbSofDrain)
 			}
 #if OPK_LOG
 
@@ -297,7 +321,7 @@ void webusbPoll()
 							applyActiveType();
 					}
 					saveCfg();
-					webusbSendBlob();
+					g_blobRequest = true;
 					memmove(buf, buf + need, n - need);
 					n -= need;
 					continue;
@@ -430,12 +454,13 @@ void webusbPoll()
 				}
 				if (persist)
 					saveCfg();
-				webusbSendBlob();
+				g_blobRequest = true;
 			} else if (op == 0x03) {
 				uint8_t m = buf[1];
 				if (modeValid(m) && !USBDevice.suspended()) {
-					webusbSendBlob();
-					usb_web.flush();
+					// best-effort status to the panel before the reboot; the SOF drain
+					// sends it during the delay(40) below (no blocking flush on loop()).
+					g_blobRequest = true;
 					saveMode(m);
 					delay(40);
 					faultDiagArmIntentionalReset();

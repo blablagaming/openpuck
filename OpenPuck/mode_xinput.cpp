@@ -256,14 +256,15 @@ static void xinputSend(uint8_t slot, uint16_t buttons, uint8_t lt, uint8_t rt,
 	r[12] = ry & 0xFF;
 	r[13] = ry >> 8;
 	memset(r + 14, 0, 6);
-	// Hand off to the usbd task: the xfer is issued from usbTxDrainHook() (SOF), not here, so loop() never
+	// Hand off to the usbd task: the xfer is issued from xiSofDrain() (SOF), not here, so loop() never
 	// calls into the dcd transfer path (which can block on the device event queue under load).
 	S.txPending = true;
 }
 
-// usbd-task drain (called from tud_sof_cb via usbTxDrainHook). Issues the deferred XInput IN transfers. Runs at
-// higher priority than loop(), so the claim->xfer is atomic w.r.t. xinputSend() refilling inBuf -- no torn DMA.
-extern "C" void usbTxDrainHook(void)
+// usbd-task drain (registered with usbTxRegisterDrain, called from tud_sof_cb). Issues the deferred XInput IN
+// transfers. Runs at higher priority than loop(), so the claim->xfer is atomic w.r.t. xinputSend() refilling
+// inBuf -- no torn DMA.
+static void xiSofDrain(void)
 {
 	if (!tud_mounted())
 		return;
@@ -489,6 +490,8 @@ void XboxController::beginPool()
 	g_mouse.begin();
 	for (int s = 0; s < NSLOT; s++)
 		g_xinput[s].setStringDescriptor("Controller");
+	// Drain the deferred XInput IN transfers from the usbd task every SOF (only registered in this mode).
+	usbTxRegisterDrain(xiSofDrain);
 }
 void XboxController::mountSlots(uint8_t k)
 {

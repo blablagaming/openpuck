@@ -95,22 +95,39 @@ void usbTxDrain(void)
 	}
 }
 
-// Weak no-op default; mode_xinput overrides it to flush its raw custom-class IN endpoints from the usbd task.
-extern "C" __attribute__((weak)) void usbTxDrainHook(void)
+// Per-frame drain callbacks for non-HID senders (XInput endpoint, WebUSB blob). Registered at setup(),
+// invoked from tud_sof_cb on the usbd task. Fixed, tiny capacity; registration is setup-only (single-threaded)
+// so no locking is needed and the SOF reader sees a stable list.
+#define TX_DRAIN_MAX 4
+static usbTxDrainFn g_drainFns[TX_DRAIN_MAX];
+static uint8_t g_nDrain;
+
+void usbTxRegisterDrain(usbTxDrainFn fn)
 {
+	if (fn && g_nDrain < TX_DRAIN_MAX)
+		g_drainFns[g_nDrain++] = fn;
 }
 
-// TinyUSB dispatches tud_sof_cb from tud_task() on the usbd task once per USB (micro)frame. Overriding the weak
-// default routes that into our drain. Keep it minimal -- it runs every ~1 ms.
-extern "C" void tud_sof_cb(uint32_t frame_count)
+// Drain trigger: a DEDICATED FreeRTOS task -- NOT tud_sof_cb. SOF proved unusable here: TinyUSB gates the SOF
+// callback on `sof_consumer`, which configuration_reset() wipes on every bus reset (tu_varclr(&_usbd_dev)), so
+// after the host's first reset tud_sof_cb silently stops firing and NO device->host data flows (0x45 input,
+// the 0x79 connect report, streamed reports, the WebUSB blob -- all dead, while RF keeps working). A plain task
+// is ungated and always runs. Crucially it is a SEPARATE task from loop(): if a sendReport ever blocks on a
+// full usbd event queue, this task just blocks/yields -- loop() keeps running and feeding the ~8 s watchdog,
+// which is the whole reason we moved sends off loop() in the first place.
+static void usbTxTask(void *arg)
 {
-	(void)frame_count;
-	usbTxDrain();
-	usbTxDrainHook();
+	(void)arg;
+	for (;;) {
+		usbTxDrain();
+		for (uint8_t i = 0; i < g_nDrain; i++)
+			g_drainFns[i]();
+		vTaskDelay(1); // ~1 ms, matching the USB frame cadence
+	}
 }
-
 void usbTxBegin(void)
 {
-	// SOF callbacks are off by default (they are high frequency); turn them on so usbTxDrain() runs.
-	tud_sof_cb_enable(true);
+	// 512 words (2 KB): covers the deepest drain path (webusbSendBlob's 115 B frame + the tud_* call chain).
+	// TASK_PRIO_LOW = same as loop(): cooperative, won't preempt the RF poll timing; vTaskDelay yields each ms.
+	xTaskCreate(usbTxTask, "usbtx", 512, NULL, TASK_PRIO_LOW, NULL);
 }

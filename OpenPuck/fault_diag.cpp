@@ -9,6 +9,16 @@
 
 static uint8_t g_reason = RR_UNKNOWN;
 static uint32_t g_resetReas = 0;
+static uint8_t g_hangStage = 0xFF;
+
+// Hang breadcrumb: loop() stage written to GPREGRET2 as 0x80|stage. 0x80..0x9F can never collide with the
+// intentional-reboot (0xB1) / HardFault (0xFA) markers or the power-on default (0), so the same register
+// disambiguates all of them at boot.
+#define G2_STAGE_FLAG 0x80u
+static const char *const STAGE_STR[] = { "webusb", "ctrl.task", "serial",
+					 "rfdiag", "rflink",	"haptic",
+					 "led",	   "usbmount",	"usbtx" };
+#define STAGE_COUNT ((uint8_t)(sizeof STAGE_STR / sizeof STAGE_STR[0]))
 
 static const char *const REASON_STR[RR_COUNT] = {
 	"unknown",   "power-on", "pin/replug", "WATCHDOG (hang)", "CPU lockup",
@@ -33,6 +43,47 @@ void faultDiagArmIntentionalReset()
 	NRF_POWER->GPREGRET2 = G2_INTENT;
 }
 
+// Live stage + loop heartbeat. The post-reset GPREGRET2 breadcrumb only works if the bootloader preserves
+// GPREGRET2 across a watchdog reset -- some clone boards clear it, so it reads blank. These LIVE values don't
+// depend on surviving a reset: the WebUSB blob send runs on the USB SOF interrupt (independent of loop()), so
+// when loop() wedges, the SOF drain can still report the current stage + how long loop() has been stuck,
+// straight to the panel during the ~8s before the watchdog fires.
+static volatile uint8_t g_curStage = 0xFF;
+static volatile uint32_t g_loopBeatMs = 0;
+
+void faultDiagSetStage(uint8_t stage)
+{
+	g_curStage = stage;
+	NRF_POWER->GPREGRET2 = (uint8_t)(G2_STAGE_FLAG | (stage & 0x1Fu));
+}
+
+void faultDiagBeat()
+{
+	g_loopBeatMs = millis();
+}
+uint8_t faultDiagCurStage()
+{
+	return g_curStage;
+}
+uint32_t faultDiagStallMs()
+{
+	// ms since loop() last beat. ~0 when healthy (loop beats ~250x/s); grows while loop() is stuck.
+	return (uint32_t)(millis() - g_loopBeatMs);
+}
+const char *faultDiagStageStr(uint8_t s)
+{
+	return s < STAGE_COUNT ? STAGE_STR[s] : "?";
+}
+
+uint8_t faultDiagHangStage()
+{
+	return g_hangStage;
+}
+const char *faultDiagHangStageStr()
+{
+	return g_hangStage < STAGE_COUNT ? STAGE_STR[g_hangStage] : "n/a";
+}
+
 void faultDiagBoot()
 {
 	uint32_t rr =
@@ -40,6 +91,16 @@ void faultDiagBoot()
 	uint8_t g2 = (uint8_t)NRF_POWER->GPREGRET2;
 	NRF_POWER->GPREGRET2 = 0; // consume the marker for this boot cycle
 	g_resetReas = rr;
+
+	// If this boot follows a watchdog/lockup reset and GPREGRET2 holds a stage breadcrumb (0x80|stage), recover
+	// which loop stage was stuck. Only meaningful for hangs -- an intentional reboot/HardFault stamps its own
+	// marker over the breadcrumb, and a clean power-on zeroes it.
+	bool isHang = (rr & POWER_RESETREAS_DOG_Msk) ||
+		      (rr & POWER_RESETREAS_LOCKUP_Msk);
+	if (isHang && (g2 & G2_STAGE_FLAG) && g2 < G2_INTENT)
+		g_hangStage = (uint8_t)(g2 & 0x1Fu);
+	else
+		g_hangStage = 0xFF;
 
 	uint8_t reason;
 	// Precedence: a physical pin reset / watchdog / lockup is unambiguous from RESETREAS; only a SREQ needs the
@@ -65,6 +126,69 @@ void faultDiagBoot()
 	Serial.printf(
 		"# reset cause: %s (RESETREAS=0x%08lX gpregret2=0x%02X)\n",
 		REASON_STR[reason], (unsigned long)rr, g2);
+	if (g_hangStage != 0xFF)
+		Serial.printf("# hang stage: %s (%u)\n", faultDiagHangStageStr(),
+			      g_hangStage);
+}
+
+// ---- clock fingerprint -------------------------------------------------------------------------------------
+static uint8_t g_clkLf = 0, g_clkHf = 0;
+static uint16_t g_clkUsPerMs = 0;
+
+void clockDiagBoot()
+{
+	// LFCLKSTAT: bit16 STATE(running), bits1:0 SRC (0=RC,1=Xtal,2=Synth). HFCLKSTAT: bit16 STATE, bit0 SRC
+	// (0=RC,1=Xtal). The bare-metal radio needs HFXO; if HF shows RC here, RF runs on the 64 MHz internal RC.
+	uint32_t lf = NRF_CLOCK->LFCLKSTAT;
+	uint32_t hf = NRF_CLOCK->HFCLKSTAT;
+	bool lfrun = lf & CLOCK_LFCLKSTAT_STATE_Msk;
+	uint8_t lfsrc = (uint8_t)(lf & CLOCK_LFCLKSTAT_SRC_Msk);
+	g_clkLf = lfrun ? (uint8_t)(lfsrc + 1) : 0; // 1=RC,2=Xtal,3=Synth, 0=stopped
+	bool hfxtal = hf & CLOCK_HFCLKSTAT_SRC_Msk;
+	g_clkHf = hfxtal ? 2 : 0; // 2=crystal, 0=RC
+	Serial.printf("# clock: LFCLK=%s HFCLK=%s\n",
+		      g_clkLf == 2 ? "xtal" :
+		      g_clkLf == 1 ? "RC" :
+		      g_clkLf == 3 ? "synth" :
+				     "stopped",
+		      g_clkHf == 2 ? "xtal" : "RC");
+}
+
+void clockDiagTick()
+{
+	// Cross-check the two time bases: count micros() (HFCLK-derived) elapsed over a ~1s millis() (LFCLK/RTC)
+	// window. usPerMs = micros-delta / millis-delta; 1000 = the clocks agree. A clone whose HFCLK runs fast vs
+	// its LFCLK reads >1000 here -- the exact signature behind "poll rate too high, delivered too low".
+	static uint32_t u0 = 0;
+	static unsigned long m0 = 0;
+	static bool init = false;
+	unsigned long m = millis();
+	if (!init) {
+		u0 = micros();
+		m0 = m;
+		init = true;
+		return;
+	}
+	unsigned long dm = m - m0;
+	if (dm >= 1000) {
+		uint32_t du = (uint32_t)(micros() - u0);
+		g_clkUsPerMs = (uint16_t)(du / dm);
+		u0 = micros();
+		m0 = m;
+	}
+}
+
+uint8_t clockLfSrc()
+{
+	return g_clkLf;
+}
+uint8_t clockHfSrc()
+{
+	return g_clkHf;
+}
+uint16_t clockUsPerMs()
+{
+	return g_clkUsPerMs;
 }
 
 uint8_t faultDiagReason()

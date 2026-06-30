@@ -78,8 +78,12 @@ extern uint16_t g_f1ps; // last completed second's F1 rate
 // genuine new-report rate (report 0x45 seq byte changes)
 extern uint16_t g_newps;
 
-// last second's poll TX count (GET+relay) -- vs F1 tells starvation from reply-loss
+// last second's TRUE poll-cycle count (one E3 GET per warm slot per cycle, ~250 for one controller) -- vs F1
+// tells starvation from reply-loss.
 extern uint16_t g_pollsps;
+// last second's relay-frame TX count (host/haptic output reports forwarded to the controller). Each relay TX
+// precedes a poll and consumes a reply window, so a high relay rate directly depresses the F1/delivered rate.
+extern uint16_t g_relayps;
 // last second's CRC-fail and no-reply counts: diagnose a wedge -- polls>0 + noRx high = RX dead / wrong
 // channel / controller silent; crc high = corrupt replies (interference); polls==0 = poll loop stopped.
 extern uint16_t g_crcps, g_norxps;

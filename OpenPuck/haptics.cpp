@@ -75,6 +75,12 @@ static inline uint8_t rqNext(uint8_t i)
 {
 	return (uint8_t)((i + 1) % RELAY_QLEN);
 }
+// Counts times a ring-drain loop hit its iteration cap = head/tail were desynced or corrupted (e.g. an
+// out-of-range g_rqHead from a stray write/stack overflow). These loops run with IRQs DISABLED, so an
+// unterminated one spins forever with interrupts off -> millis()/USB/SOF all freeze and only the hardware
+// watchdog recovers (an invisible "watchdog (hang)" -- the live stall monitor can't see it because the SOF
+// IRQ is dead). The cap turns that into a logged, recovered event instead of a hang. Surfaced on the panel.
+volatile uint16_t g_ringFault = 0;
 
 bool relayPending()
 {
@@ -237,7 +243,13 @@ static void hapticCancelPendingOn()
 	uint32_t pm = __get_PRIMASK();
 	__disable_irq();
 	for (int s = 0; s < NSLOT; s++) {
+		uint8_t guard = RELAY_QLEN + 1;
 		for (uint8_t i = g_rqTail[s]; i != g_rqHead[s]; i = rqNext(i)) {
+			if (!guard--) { // desynced/corrupt ring -> recover, don't spin IRQs-off
+				g_rqHead[s] = g_rqTail[s] = 0;
+				g_ringFault++;
+				break;
+			}
 			RelayMsg &m = g_rq[s][i];
 			if (m.rid == 0x82) {
 				bool on = false;
@@ -338,7 +350,7 @@ void rfConnQueueHapticRelay()
 // rfConnFlushRelay(ch, s1): drain one entry from the current slot's relay queue and TX it. Each slot's queue
 // is independent, so each controller only sees its own commands. With N connected slots the per-slot relay
 // rate is 1/N of the per-cycle rate; sustained buzz streams are still 1 packet/cycle/slot.
-void rfConnFlushRelay(uint8_t ch, uint8_t s1)
+bool rfConnFlushRelay(uint8_t ch, uint8_t s1)
 {
 	int cur = (g_curSlot >= 0 && g_curSlot < NSLOT) ? g_curSlot : 0;
 	// Snapshot one entry under a short critical section. relayEnqueue() (the producer) runs on the
@@ -350,7 +362,13 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1)
 	bool have = false;
 	uint32_t pm = __get_PRIMASK();
 	__disable_irq();
+	uint8_t guard = RELAY_QLEN + 1;
 	while (g_rqTail[cur] != g_rqHead[cur]) {
+		if (!guard--) { // desynced/corrupt ring -> recover, don't spin IRQs-off (watchdog-hang class)
+			g_rqHead[cur] = g_rqTail[cur] = 0;
+			g_ringFault++;
+			break;
+		}
 		RelayMsg &m = g_rq[cur][g_rqTail[cur]];
 		g_rqTail[cur] = rqNext(g_rqTail[cur]); // consume the slot
 		// rid 0 = entry voided by hapticCancelPendingOn -> skip
@@ -402,6 +420,7 @@ void rfConnFlushRelay(uint8_t ch, uint8_t s1)
 				 80); // one relay per poll cycle
 		}
 	}
+	return have; // true = a relay frame went out this cycle (steals a reply window from the E3 poll)
 }
 
 // Haptic-subsystem re-init: the captured sequence Steam sends when it (re)takes control (0x81 reset + 0x87
@@ -470,9 +489,8 @@ void hapticInit()
 		g_rqHead[s] = g_rqTail[s] = 0;
 		g_rumble80On[s] = false;
 		g_rumble80Ms[s] = 0;
-		// block stale Steam 0x82 until the link is stable after boot (when the block is enabled)
-		g_hapticBlockUntil[s] =
-			g_hapticBlockOn ? (millis() + g_hapticBlockMs) : 0;
+		// post-connect haptic block is permanently disabled (not armed, not configurable)
+		g_hapticBlockUntil[s] = 0;
 	}
 }
 // Arm the post-(re)connect haptic block + schedule the clearing re-init. Called on the reliable first-reply
@@ -482,8 +500,8 @@ void hapticOnReconnect(int slot)
 {
 	if (slot < 0 || slot >= NSLOT)
 		return;
-	g_hapticBlockUntil[slot] =
-		g_hapticBlockOn ? (millis() + g_hapticBlockMs) : 0;
+	// post-connect haptic block is permanently disabled -- relay haptics immediately on (re)connect
+	g_hapticBlockUntil[slot] = 0;
 	g_haptic82On = false;
 	g_rumble80On[slot] = false;
 	g_rumble80Ms[slot] = 0;

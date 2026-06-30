@@ -35,7 +35,8 @@ static volatile bool g_bondExportRequest = false;
 // p[6]/p[7]/p[8..11] mirror the ACTIVE type (legacy display). v11 extends to 113 bytes (115 total incl header);
 // browser reads with transferIn(128) to span the two USB-FS packets.
 //                [diag: crc/s][noRx/s][rfStallRecover count]
-#define WB_PAYLEN 116
+//                [v12: relayps(lo,hi)][clkLfSrc][clkHfSrc][usPerMs(lo,hi)][hangStage][curStage][stallMs/40][ringFault(lo,hi)]
+#define WB_PAYLEN 127
 // The blob send is drop-on-full (never blocks loop), so the vendor TX FIFO MUST be able to hold a whole blob
 // -- otherwise tud_vendor_write_available() never reaches the frame size and EVERY frame is dropped (blank
 // panel / stale mappings). The Makefile sets -DCFG_TUD_VENDOR_TX_BUFSIZE=256; guard it here so a build without
@@ -56,8 +57,8 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (11 = +reset cause; 10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
-	p[2] = 11;
+	// protocol version (12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
+	p[2] = 12;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -166,6 +167,26 @@ static void webusbSendBlob()
 	p[115] = (uint8_t)(g_crcps > 255 ? 255 : g_crcps);
 	p[116] = (uint8_t)(g_norxps > 255 ? 255 : g_norxps);
 	p[117] = (uint8_t)(g_rfStallRecover > 255 ? 255 : g_rfStallRecover);
+	// v12: relay-frame TX rate (separated from true poll cycles -- Polls/s now reads ~250, Relay/s exposes the
+	// host output-report flood that steals reply windows), and the clock fingerprint for clone-board triage.
+	p[118] = (uint8_t)g_relayps;
+	p[119] = (uint8_t)(g_relayps >> 8);
+	p[120] = clockLfSrc();
+	p[121] = clockHfSrc();
+	uint16_t upm = clockUsPerMs();
+	p[122] = (uint8_t)upm;
+	p[123] = (uint8_t)(upm >> 8);
+	// last hang's loop stage (0xFF = last boot wasn't a watchdog/lockup hang, or GPREGRET2 didn't survive)
+	p[124] = faultDiagHangStage();
+	// LIVE hang localization: current loop stage + how long loop() has been stuck (40ms units, capped). When
+	// loop() wedges these keep updating because the blob is sent from the SOF interrupt, not loop().
+	p[125] = faultDiagCurStage();
+	uint32_t sms = faultDiagStallMs();
+	p[126] = (uint8_t)(sms / 40 > 255 ? 255 : sms / 40);
+	// relay-ring fault count: non-zero = we caught+recovered a desynced/corrupt ring that would otherwise be an
+	// invisible IRQ-off watchdog hang. A climbing count points at the haptic relay path / memory corruption.
+	p[127] = (uint8_t)g_ringFault;
+	p[128] = (uint8_t)(g_ringFault >> 8);
 	// CRITICAL: usb_web.write() SPINS (`while (remain && _connected) yield();`) until the IN FIFO drains or the
 	// panel disconnects. If the panel holds the WebUSB interface open but stops reading its IN endpoint -- a
 	// backgrounded tab, or the host briefly not servicing transferIn under load -- the FIFO never empties and
@@ -214,6 +235,11 @@ static void webusbSendBondExport()
 // one. Keeps every usb_web write/flush off the loop task so it can't block on the device event queue.
 static void webusbSofDrain(void)
 {
+	// If loop() has stopped beating, it's wedged -- keep pushing the blob (which carries the live stuck stage)
+	// so the panel shows WHERE it hung during the ~8s before the watchdog fires. This runs on the SOF IRQ, so
+	// it works even though loop() is dead. drop-on-full in webusbSendBlob keeps it from ever blocking.
+	if (faultDiagStallMs() > 300)
+		g_blobRequest = true;
 	if (g_blobRequest) {
 		g_blobRequest = false;
 		webusbSendBlob();
@@ -537,18 +563,7 @@ void webusbPoll()
 					break; // Switch Pro gyro scale x10
 
 				// (field 25, poll RX window, removed -- g_rxWin is now FIXED/not configurable)
-
-				// post-connect haptic block enable: drop Steam haptics for g_hapticBlockMs after a connect
-				case 27:
-					g_hapticBlockOn = v ? 1 : 0;
-					break;
-
-				// post-connect haptic block duration, in seconds (clamp 0..60)
-				case 28:
-					g_hapticBlockMs =
-						(uint16_t)((v > 60 ? 60 : v) *
-							   1000u);
-					break;
+				// (fields 27/28, post-connect haptic block, removed -- permanently disabled)
 				}
 				if (persist)
 					saveCfg();

@@ -18,6 +18,10 @@ Adafruit_USBD_WebUSB usb_web;
 // goes through the same blocking osd_queue_send path as HID sends, so doing it from loop() could stall the
 // loop and trip the watchdog under load -- with the panel open during heavy use that was a live risk.
 static volatile bool g_blobRequest = false;
+// Bond export ("clone" backup): a 0x09 panel command asks for a one-shot dump of all four bond slots so the
+// browser can save them to a file and restore them onto a second puck. Like the status blob, the actual send
+// is deferred to the usbd task (webusbSofDrain) so usb_web.write()/flush() never block loop().
+static volatile bool g_bondExportRequest = false;
 
 // blob payload = [ver=10][mode][mDiv][mFric][qamMap(active)][abSwap(active)][back0..3(active)][connSlot(0xFF=none)][linkUp]
 //                [f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub][fwdNewOnly]
@@ -176,6 +180,36 @@ static void webusbSendBlob()
 	}
 }
 
+// Bond export frame (panel "Export config to file"). One self-describing frame carrying all four bond slots so
+// the browser can clone a puck onto another without re-pairing:
+//   [0xA7][len][ver=1][usedMask][slot0 rec 24]...[slot3 rec 24]   (len = 2 + NSLOT*24 = 98)
+// usedMask bit s = slot s bonded. The session RF address is NOT exported: each puck re-derives it from the bond
+// UUID + its own FICR DEVICEID at boot, and the bonded controller relearns it from the E1 host beacon on every
+// reconnect (rf_link.cpp) -- so the 24-byte record is the whole portable identity. 98+2 < transferIn(128) and
+// < CFG_TUD_VENDOR_TX_BUFSIZE (256), so it sends whole in one drop-on-full write like the status blob.
+#define WB_BOND_PAYLEN (2 + NSLOT * 24)
+static void webusbSendBondExport()
+{
+	if (!usb_web.connected())
+		return;
+	uint8_t p[2 + WB_BOND_PAYLEN];
+	p[0] = 0xA7;
+	p[1] = WB_BOND_PAYLEN;
+	p[2] = 1; // format version
+	uint8_t mask = 0;
+	for (int s = 0; s < NSLOT; s++) {
+		if (g_slot[s].used)
+			mask |= (uint8_t)(1u << s);
+		memcpy(&p[4 + s * 24], g_slot[s].rec, 24);
+	}
+	p[3] = mask;
+	// Same anti-hang rule as the status blob: drop the frame if the FIFO can't take it whole, never spin.
+	if (tud_vendor_write_available() >= sizeof p) {
+		usb_web.write(p, sizeof p);
+		usb_web.flush();
+	}
+}
+
 // Runs on the usbd task (registered via usbTxRegisterDrain -> tud_sof_cb). Sends the blob if loop() asked for
 // one. Keeps every usb_web write/flush off the loop task so it can't block on the device event queue.
 static void webusbSofDrain(void)
@@ -183,6 +217,10 @@ static void webusbSofDrain(void)
 	if (g_blobRequest) {
 		g_blobRequest = false;
 		webusbSendBlob();
+	}
+	if (g_bondExportRequest) {
+		g_bondExportRequest = false;
+		webusbSendBondExport();
 	}
 }
 // Register the SOF drain. Call once from setup() (harmless even if WebUSB isn't enumerated -- webusbSendBlob
@@ -244,7 +282,9 @@ static void webusbDrainCapture()
 #endif // OPK_LOG
 void webusbPoll()
 {
-	static uint8_t buf[16];
+	// 40 B holds the largest command: 0x0D writes one bond slot = [0x0D][slot][used][24 rec] = 27 B (still
+	// inside one 64-B USB-FS OUT packet, so no command ever spans packets). Every other command is <= 4 B.
+	static uint8_t buf[40];
 	static uint8_t n = 0;
 	while (usb_web.available()) {
 		int c = usb_web.read();
@@ -257,21 +297,27 @@ void webusbPoll()
 			if (n == 0)
 				break;
 			uint8_t op = buf[0];
-
-			// 0x05 carries a value byte; 0x0A carries a 3-byte magic
-			uint8_t need = (op == 0x02)		  ? 3 :
-				       (op == 0x03 || op == 0x05) ? 2 :
-				       (op == 0x0A)		  ? 4 :
-								    1;
-			if (op < 0x01 || op > 0x0C) { // resync: drop one byte
+			if (op < 0x01 || op > 0x0E) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
 			}
+			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x05/0x0E carry one
+			// value byte; 0x02 a field+value; 0x0A a 3-byte magic.
+			uint8_t need = (op == 0x0D)		      ? 27 :
+				       (op == 0x02)		      ? 3 :
+				       (op == 0x03 || op == 0x05 ||
+					op == 0x0E)		      ? 2 :
+				       (op == 0x0A)		      ? 4 :
+								        1;
 			if (n < need)
 				break; // wait for more bytes
 			if (op == 0x01) {
 				g_blobRequest =
 					true; // sent from the usbd task (webusbSofDrain)
+			}
+			// 0x09: export all bond slots (clone backup). One 0xA7 frame, sent from the usbd task.
+			else if (op == 0x09) {
+				g_bondExportRequest = true;
 			}
 #if OPK_LOG
 
@@ -319,6 +365,38 @@ void webusbPoll()
 				delay(40);
 				faultDiagArmIntentionalReset();
 				enterUf2Dfu();
+
+				// 0x0D: write ONE bond slot into RAM -- the "clone onto this puck" side of Export/Import.
+				// [0x0D][slot][used][24 rec]. used=0 (or an empty record) clears the slot. The panel sends
+				// one of these per slot, then a 0x0E to persist + reboot. Kept to a single small command
+				// (<=27 B) so it never spans a USB packet, and acked with a status blob so the panel's
+				// read-after-write keeps the OUT pipe flowing (same shape as the proven 0x02 setters).
+			} else if (op == 0x0D) {
+				uint8_t slot = buf[1], used = buf[2];
+				if (slot < NSLOT) {
+					if (used && !recEmpty(buf + 3)) {
+						memcpy(g_slot[slot].rec, buf + 3,
+						       24);
+						g_slot[slot].used = true;
+					} else {
+						memset(g_slot[slot].rec, 0, 24);
+						g_slot[slot].used = false;
+					}
+				}
+				g_blobRequest = true; // ack
+
+				// 0x0E: commit an import -- persist the bond slots written by 0x0D, optionally apply a USB
+				// mode ([0x0E][mode]; 0xFF = leave unchanged), then reboot so the RF session addresses
+				// regenerate from the new bond UUIDs.
+			} else if (op == 0x0E) {
+				uint8_t mode = buf[1];
+				saveBonds();
+				if (modeValid(mode))
+					saveMode(mode);
+				usb_web.flush();
+				delay(40);
+				faultDiagArmIntentionalReset();
+				NVIC_SystemReset();
 
 			} else if (op == 0x02) {
 				uint8_t f = buf[1], v = buf[2];

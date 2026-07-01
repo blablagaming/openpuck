@@ -186,6 +186,17 @@
       <p class="note">Import <strong>overwrites</strong> all pairings and settings on the connected puck, then reboots it (~2 s — reconnect after). Tip: pair every controller to one puck, export once, then import onto each spare.</p>
     </div>
 
+    <div class="card">
+      <h2>Hang log</h2>
+      <p class="note" style="margin-top:0">One row per reset: uptime before it, reason, the stuck loop stage and captured PC (when the watchdog ISR could run), and usbd stack free. Accumulates across resets in this tab — a page refresh clears it. Pair with <em>Test stability</em> above for unattended runs.</p>
+      <div class="row" style="margin:0 0 8px;flex-wrap:wrap">
+        <span class="v" id="hangSummary" style="flex:1">no resets logged yet</span>
+        <button id="hangCsv">Download CSV</button>
+        <button id="hangClear">Clear</button>
+      </div>
+      <pre id="hangOut" style="font:12px ui-monospace,Menlo,monospace;color:var(--fg);background:#0e1017;border:1px solid #232a3a;border-radius:8px;padding:10px;margin:0;max-height:260px;overflow:auto;white-space:pre"></pre>
+    </div>
+
     <div class="card logonly">
       <h2>Capture — host → controller commands</h2>
       <p class="note" style="margin-top:0">The firmware logs everything from boot into a big RAM ring: Steam's writes (<code>ifN</code>), the frames we transmit to the controller (<code>TX→ctlr</code>), and RF <code>LINK UP/DOWN</code> edges. For the reconnect buzz: trigger it (it appears moments after the puck boots / the controller reconnects), then connect here and click <b>Dump from boot</b> — the trigger is still in the ring. (Only present in a logging build, <code>-DOPK_LOG=1</code>.)</p>
@@ -210,6 +221,19 @@ let lastP=null; // most recent status-blob payload (config source for Export)
 // Stability test: armed = active across reconnects; stabStart = ms of the current run; stabLastRun = last
 // completed run {secs} (ended by a reset). Kept in-page so it survives the device reset (not a page refresh).
 let stabArmed=false, stabStart=0, stabLastRun=null;
+// Running hang log: one entry per reset (persists in-page across the device reset; a page refresh clears it).
+// pendingHang is set at disconnect and enriched with reason/PC/stack from the first blob after reconnect.
+let hangLog=[], pendingHang=null;
+function renderHangLog(){
+  const out=$("#hangOut"), sum=$("#hangSummary"); if(!out) return;
+  if(!hangLog.length){ out.textContent=""; sum.textContent="no resets logged yet"; return; }
+  const ups=hangLog.filter(e=>e.uptime!=null).map(e=>e.uptime);
+  const avg=ups.length?Math.round(ups.reduce((a,b)=>a+b,0)/ups.length):null;
+  sum.textContent = hangLog.length+" reset(s)"+(avg!=null?("  ·  avg uptime "+fmtDur(avg)):"");
+  const pad=(s,n)=>String(s).padEnd(n);
+  out.textContent = pad("time",11)+pad("uptime",9)+pad("reason",16)+pad("stage",10)+pad("PC",11)+"usbd\n"
+    + hangLog.map(e=>pad(e.time,11)+pad(e.uptime!=null?fmtDur(e.uptime):"-",9)+pad(e.reason,16)+pad(e.stage||"-",10)+pad(e.pc||"-",11)+(e.usbd!=null?e.usbd:"-")).join("\n");
+}
 function fmtDur(s){ s=Math.round(s); return s>=60 ? (Math.floor(s/60)+"m "+(s%60)+"s") : (s+"s"); }
 function updateStabUI(){
   const btn=$("#stabBtn"), st=$("#stabStatus");
@@ -401,7 +425,10 @@ async function autoConnect(){
 function onGone(){
   // if a stability test is running, this disconnect is the reset that ended the run -- record its uptime
   // (kept in-page so it survives the reset + reconnect, shown next to Last reset).
-  if(stabArmed && stabStart){ stabLastRun={secs:(Date.now()-stabStart)/1000}; log("⏱ stability: stayed up "+fmtDur(stabLastRun.secs)+", then reset"); stabStart=0; }
+  let up=null;
+  if(stabArmed && stabStart){ up=(Date.now()-stabStart)/1000; stabLastRun={secs:up}; log("⏱ stability: stayed up "+fmtDur(up)+", then reset"); stabStart=0; }
+  // queue a hang-log entry; the reason/PC/stack are filled from the first blob after reconnect
+  pendingHang = { t: Date.now(), uptimeSecs: up };
   polling=false; dev=null; tabInited=false; // re-default the config tab to the mode on next connect
   $("#connState").textContent="reconnecting…"; $("#connState").className="pill dn";
   $("#panel").classList.add("hide");
@@ -584,6 +611,14 @@ function applyBlob(p){
       + (hpc ? "  hang PC="+hx(hpc)+" LR="+hx(hlr) : "")
       + (stabLastRun ? "  ·  stability: stayed up "+fmtDur(stabLastRun.secs)+" before this reset" : "");
     if (hpc && hpc!==window._hangPC){ window._hangPC=hpc; log("⚑ HANG PC="+hx(hpc)+" LR="+hx(hlr)+" — send me this; I'll map it to the stuck function"); }
+    // append the queued reset to the running hang log, now that we have this boot's reason/PC/stack
+    if (pendingHang){
+      const usbdW2=(p.length>136?(p[135]|(p[136]<<8)):0);
+      hangLog.unshift({ time:new Date(pendingHang.t).toLocaleTimeString(), uptime:pendingHang.uptimeSecs,
+        reason:name, stage:(hangStage!==0xFF)?(STAGE_NAMES[hangStage]||("stage"+hangStage)):"",
+        pc:hpc?hx(hpc):"", lr:hlr?hx(hlr):"", usbd:usbdW2 });
+      pendingHang=null; renderHangLog();
+    }
   }
 
   const gitDirty=(p.length>38?p[38]:0); let gitHash="";
@@ -810,6 +845,14 @@ $("#stabBtn").onclick=async()=>{
   if(stabArmed){ await send([0x0F,1]); stabStart=Date.now(); stabLastRun=null; log("stability test STARTED — buzzing every 10s, timing uptime until reset"); }
   else { await send([0x0F,0]); stabStart=0; log("stability test stopped"); }
   updateStabUI();
+};
+$("#hangClear").onclick=()=>{ hangLog=[]; renderHangLog(); };
+$("#hangCsv").onclick=()=>{
+  const rows=[["time","uptime_s","reason","stage","pc","lr","usbd_free_words"]].concat(
+    hangLog.map(e=>[e.time, e.uptime!=null?Math.round(e.uptime):"", e.reason, e.stage, e.pc, e.lr, e.usbd]));
+  const csv=rows.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(",")).join("\n");
+  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="openpuck-hanglog.csv"; a.click();
 };
 $("#hapClear").onclick=async()=>{ if(dev){ await send([0x07]); log("haptic re-init sent (clear stuck buzz)"); } };
 $("#ctlrOff").onclick=async()=>{ if(dev){ await send([0x08]); log("controller power-off attempt sent — watch link status"); } };

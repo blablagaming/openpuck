@@ -1,5 +1,8 @@
 #include "fault_diag.h"
 #include <Arduino.h> // readResetReason(), NRF_POWER, NVIC_SystemReset, POWER_RESETREAS_*_Msk
+#include <FreeRTOS.h>
+#include <task.h> // uxTaskGetSystemState -> per-task stack high-water (overflow hypothesis check)
+#include <string.h>
 
 // GPREGRET2 markers. GPREGRET (id 0) is reserved by the Adafruit bootloader for the DFU magic; GPREGRET2 is
 // free for the application and is retained across soft/watchdog/pin reset, cleared only on power-on/brownout.
@@ -10,6 +13,56 @@
 static uint8_t g_reason = RR_UNKNOWN;
 static uint32_t g_resetReas = 0;
 static uint8_t g_hangStage = 0xFF;
+
+// ---- watchdog pre-reset PC capture ("software SWD") --------------------------------------------------------
+// The nRF52 WDT raises a TIMEOUT interrupt ~2 LFCLK cycles BEFORE it resets the chip. We take that interrupt at
+// the highest NVIC priority (0) -- above FreeRTOS/TinyUSB BASEPRI critical sections -- read the stacked PC of
+// whatever code was wedged, and stash it in a .noinit RAM struct that survives the reset. Next boot reports it
+// on the panel; map it with addr2line to name the stuck function. Caveat: this fires only if interrupts aren't
+// hard-masked (PRIMASK/CPSID). If a watchdog reset reports NO pc, the hang was a PRIMASK-off / flash-stall type
+// (a different, narrower class) -- itself a useful signal. .noinit isn't zeroed by the C runtime, so it rides
+// through the watchdog reset (unlike GPREGRET2, which this board's bootloader wipes).
+struct HangFrame {
+	uint32_t pc, lr, magic;
+};
+#define HANGPC_MAGIC 0x48414E47u // "HANG"
+__attribute__((section(".noinit"))) volatile struct HangFrame g_hangFrame;
+static uint32_t g_reportHangPC = 0, g_reportHangLR = 0;
+
+__attribute__((naked)) void WDT_IRQHandler(void)
+{
+	__asm volatile(
+		"tst lr, #4            \n" // EXC_RETURN bit2: 0=frame on MSP, 1=on PSP
+		"ite eq                \n"
+		"mrseq r0, msp         \n"
+		"mrsne r0, psp         \n"
+		"ldr r1, [r0, #24]     \n" // stacked PC  (frame[6])
+		"ldr r3, [r0, #20]     \n" // stacked LR  (frame[5])
+		"ldr r2, =g_hangFrame  \n"
+		"str r1, [r2, #0]      \n"
+		"str r3, [r2, #4]      \n"
+		"ldr r1, =0x48414E47   \n"
+		"str r1, [r2, #8]      \n"
+		"b .                   \n" // hold until the WDT reset lands (microseconds away)
+		".ltorg                \n");
+}
+
+// Enable the WDT TIMEOUT interrupt at top priority. Call once, right after NRF_WDT->TASKS_START in setup().
+void faultDiagArmHangCapture()
+{
+	NRF_WDT->INTENSET = WDT_INTENSET_TIMEOUT_Msk;
+	NVIC_SetPriority(WDT_IRQn, 0); // above FreeRTOS configMAX_SYSCALL priority -> fires through BASEPRI guards
+	NVIC_ClearPendingIRQ(WDT_IRQn);
+	NVIC_EnableIRQ(WDT_IRQn);
+}
+uint32_t faultDiagHangPC()
+{
+	return g_reportHangPC;
+}
+uint32_t faultDiagHangLR()
+{
+	return g_reportHangLR;
+}
 
 // Hang breadcrumb: loop() stage written to GPREGRET2 as 0x80|stage. 0x80..0x9F can never collide with the
 // intentional-reboot (0xB1) / HardFault (0xFA) markers or the power-on default (0), so the same register
@@ -102,6 +155,17 @@ void faultDiagBoot()
 	else
 		g_hangStage = 0xFF;
 
+	// Recover the PC the WDT pre-reset ISR captured (if it fired -- i.e. the hang wasn't PRIMASK-off). Consume
+	// the magic so a later watchdog reset that DIDN'T capture (PRIMASK-off) can't report a stale address.
+	if (isHang && g_hangFrame.magic == HANGPC_MAGIC) {
+		g_reportHangPC = g_hangFrame.pc;
+		g_reportHangLR = g_hangFrame.lr;
+	} else {
+		g_reportHangPC = 0;
+		g_reportHangLR = 0;
+	}
+	g_hangFrame.magic = 0;
+
 	uint8_t reason;
 	// Precedence: a physical pin reset / watchdog / lockup is unambiguous from RESETREAS; only a SREQ needs the
 	// GPREGRET2 marker to split intentional reboot vs HardFault.
@@ -129,6 +193,10 @@ void faultDiagBoot()
 	if (g_hangStage != 0xFF)
 		Serial.printf("# hang stage: %s (%u)\n", faultDiagHangStageStr(),
 			      g_hangStage);
+	if (g_reportHangPC)
+		Serial.printf("# hang PC=0x%08lX LR=0x%08lX\n",
+			      (unsigned long)g_reportHangPC,
+			      (unsigned long)g_reportHangLR);
 }
 
 // ---- clock fingerprint -------------------------------------------------------------------------------------
@@ -189,6 +257,38 @@ uint8_t clockHfSrc()
 uint16_t clockUsPerMs()
 {
 	return g_clkUsPerMs;
+}
+
+// ---- per-task stack headroom (usbd-overflow hypothesis check) ---------------------------------------------
+// uxTaskGetSystemState (configUSE_TRACE_FACILITY=1) reports each task's stack high-water mark = the LEAST free
+// stack it ever had, in words. The "usbd" task (200 words / 800 B, core-fixed) runs handleSet->relayEnqueue;
+// if this trends toward 0 under haptic load, the stack overflow is confirmed. Repo-scoped, read-only, no core
+// changes -- just observing FreeRTOS.
+static uint16_t g_usbdStackMin = 0xFFFF;
+static uint16_t g_loopStackMin = 0xFFFF;
+void faultDiagStackTick()
+{
+	static unsigned long ms = 0;
+	if ((uint32_t)(millis() - ms) < 1000)
+		return;
+	ms = millis();
+	static TaskStatus_t st[12];
+	UBaseType_t n = uxTaskGetSystemState(st, 12, NULL);
+	for (UBaseType_t i = 0; i < n; i++) {
+		uint16_t hw = (uint16_t)st[i].usStackHighWaterMark;
+		if (!strcmp(st[i].pcTaskName, "usbd") && hw < g_usbdStackMin)
+			g_usbdStackMin = hw;
+		else if (!strcmp(st[i].pcTaskName, "loop") && hw < g_loopStackMin)
+			g_loopStackMin = hw;
+	}
+}
+uint16_t faultDiagUsbdStackFree()
+{
+	return g_usbdStackMin == 0xFFFF ? 0 : g_usbdStackMin;
+}
+uint16_t faultDiagLoopStackFree()
+{
+	return g_loopStackMin == 0xFFFF ? 0 : g_loopStackMin;
 }
 
 uint8_t faultDiagReason()

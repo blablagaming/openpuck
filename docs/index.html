@@ -112,6 +112,7 @@
         <div class="stat"><div class="k">Clock LF / HF</div><div class="v" id="stClock">—</div></div>
         <div class="stat"><div class="k">µs per ms (ideal 1000)</div><div class="v" id="stUsPerMs">—</div></div>
         <div class="stat"><div class="k">Loop</div><div class="v" id="stLoopState">—</div></div>
+        <div class="stat"><div class="k">usbd stack free (words)</div><div class="v" id="stUsbdStack">—</div></div>
         <div class="stat logonly"><div class="k">Loop period</div><div class="v" id="stLoop">—</div></div>
         <div class="stat logonly"><div class="k">Slowest stage</div><div class="v" id="stWorst">—</div></div>
         <div class="stat logonly"><div class="k">Poll period act/want</div><div class="v" id="stPollPer">—</div></div>
@@ -128,6 +129,10 @@
       </div>
       <div class="row" style="margin:10px 0 0"><button id="ctlrOff">Turn off controller</button>
         <span class="note" style="flex:1">Fires the controller power-off (0x9F "off!", x3) — the same path Steam's "turn off controller" and host-suspend use. Watch the link status to see it disconnect.</span>
+      </div>
+      <div class="row" style="margin:10px 0 0;border-top:1px solid #272d3d;padding-top:14px"><button id="stabBtn">Test stability</button>
+        <span class="v" id="stabStatus" style="flex:0 0 auto;min-width:120px">—</span>
+        <span class="note" style="flex:1">Buzzes the controllers every 10 s (keeps them awake) and times how long the puck stays up. On a reset it records the uptime and shows it by <em>Last reset</em>; it auto-resumes after the puck reconnects. The count is kept in this tab (a page refresh clears it).</span>
       </div>
       <div class="row" style="margin:10px 0 0;border-top:1px solid #272d3d;padding-top:14px">
         <button id="dfuSerial">Reboot to Serial DFU</button>
@@ -202,6 +207,22 @@ const MODE_NAMES = ["Steam (puck)","Xbox 360","Switch (HORIPAD)","Lizard (always
 const CHORD_FIELD = [17, 18, 19];
 let dev=null, epIn=0, epOut=0, ifNum=0, polling=false, capturing=false, backupBusy=false;
 let lastP=null; // most recent status-blob payload (config source for Export)
+// Stability test: armed = active across reconnects; stabStart = ms of the current run; stabLastRun = last
+// completed run {secs} (ended by a reset). Kept in-page so it survives the device reset (not a page refresh).
+let stabArmed=false, stabStart=0, stabLastRun=null;
+function fmtDur(s){ s=Math.round(s); return s>=60 ? (Math.floor(s/60)+"m "+(s%60)+"s") : (s+"s"); }
+function updateStabUI(){
+  const btn=$("#stabBtn"), st=$("#stabStatus");
+  if(!btn) return;
+  btn.textContent = stabArmed ? "Stop stability test" : "Test stability";
+  btn.classList.toggle("active", stabArmed);
+  let txt="";
+  if(stabArmed && dev && stabStart) txt="up "+fmtDur((Date.now()-stabStart)/1000);
+  else if(stabArmed && !dev) txt="reconnecting…";
+  if(stabLastRun) txt += (txt?"  ·  ":"")+"last run: "+fmtDur(stabLastRun.secs);
+  st.textContent = txt||"—";
+}
+setInterval(updateStabUI, 500);
 const $ = s=>document.querySelector(s);
 function log(m){ const l=$("#log"); l.textContent=(new Date().toLocaleTimeString()+"  "+m+"\n"+l.textContent).slice(0,2000); }
 
@@ -355,6 +376,9 @@ async function openDevice(d){
     $("#connectBtn").textContent="Reconnect";
     $("#panel").classList.remove("hide");
     log(`connected — puck ${dev.serialNumber||"?"} (VID ${dev.vendorId.toString(16)} iface ${ifNum})`);
+    // resume a stability test across the reset: re-arm the firmware buzz and start timing the next run
+    if(stabArmed){ await send([0x0F,1]); stabStart=Date.now(); log("stability test resumed — timing next run"); }
+    updateStabUI();
     startPolling();
     return true;
   }catch(e){ log("connect failed: "+e.message); dev=null; return false; }
@@ -375,6 +399,9 @@ async function autoConnect(){
   return false;
 }
 function onGone(){
+  // if a stability test is running, this disconnect is the reset that ended the run -- record its uptime
+  // (kept in-page so it survives the reset + reconnect, shown next to Last reset).
+  if(stabArmed && stabStart){ stabLastRun={secs:(Date.now()-stabStart)/1000}; log("⏱ stability: stayed up "+fmtDur(stabLastRun.secs)+", then reset"); stabStart=0; }
   polling=false; dev=null; tabInited=false; // re-default the config tab to the mode on next connect
   $("#connState").textContent="reconnecting…"; $("#connState").className="pill dn";
   $("#panel").classList.add("hide");
@@ -522,6 +549,12 @@ function applyBlob(p){
       $("#stLoopState").innerHTML='<span class="pill up">running</span>';
     }
   }
+  // v12: least-ever free stack on the usbd task (words). Low = overflow risk (multi-controller haptic-relay
+  // hang hypothesis). Firmware p[137] -> browser p[135]. Red under 24 words (~96B), amber under 48.
+  if(p.length>136){ const usbdW=(p[135]|(p[136]<<8));
+    $("#stUsbdStack").innerHTML = usbdW<24 ? ('<span class="pill dn">'+usbdW+'</span>')
+      : (usbdW<48 ? ('<span class="pill" style="background:#3a3216;color:#e5c76b">'+usbdW+'</span>') : (""+usbdW));
+  }
   $("#stLoop").textContent = loopUs? loopUs+" µs" : "—";
   $("#stWorst").textContent = loopUs? (WORST[worstIdx]||worstIdx)+" "+worstUs+"µs" : "—";
   $("#stPollPer").textContent = up? (pollUs+" / "+pollIntended+" µs") : "—";
@@ -541,9 +574,16 @@ function applyBlob(p){
     let label = name;
     if (hangStage!==0xFF) label += " @ "+(STAGE_NAMES[hangStage]||("stage "+hangStage));
     $("#stReset").innerHTML = RR_FAULT.has(code) ? ('<span class="pill dn">'+label+'</span>') : label;
+    // v12: PC/LR captured by the WDT pre-reset ISR (browser idx = firmware−2: hangPC@127, hangLR@131)
+    const hpc=(p.length>130?((p[127]|(p[128]<<8)|(p[129]<<16)|(p[130]<<24))>>>0):0);
+    const hlr=(p.length>134?((p[131]|(p[132]<<8)|(p[133]<<16)|(p[134]<<24))>>>0):0);
+    const hx=v=>"0x"+v.toString(16).padStart(8,"0");
     const el = $("#resetHist");
     if (el) el.textContent = "RESETREAS=0x"+raw.toString(16).padStart(8,"0")
-      + (hangStage!==0xFF ? "  hung in: "+(STAGE_NAMES[hangStage]||hangStage) : "");
+      + (hangStage!==0xFF ? "  hung in: "+(STAGE_NAMES[hangStage]||hangStage) : "")
+      + (hpc ? "  hang PC="+hx(hpc)+" LR="+hx(hlr) : "")
+      + (stabLastRun ? "  ·  stability: stayed up "+fmtDur(stabLastRun.secs)+" before this reset" : "");
+    if (hpc && hpc!==window._hangPC){ window._hangPC=hpc; log("⚑ HANG PC="+hx(hpc)+" LR="+hx(hlr)+" — send me this; I'll map it to the stuck function"); }
   }
 
   const gitDirty=(p.length>38?p[38]:0); let gitHash="";
@@ -764,6 +804,13 @@ $("#backupFile").onchange=async(e)=>{ const f=e.target.files[0]; if(f) await imp
 $("#capDl").onclick=downloadCap;
 $("#capStart").onclick=startCapture;
 $("#capStop").onclick=stopCapture;
+$("#stabBtn").onclick=async()=>{
+  if(!dev){ log("connect first"); return; }
+  stabArmed=!stabArmed;
+  if(stabArmed){ await send([0x0F,1]); stabStart=Date.now(); stabLastRun=null; log("stability test STARTED — buzzing every 10s, timing uptime until reset"); }
+  else { await send([0x0F,0]); stabStart=0; log("stability test stopped"); }
+  updateStabUI();
+};
 $("#hapClear").onclick=async()=>{ if(dev){ await send([0x07]); log("haptic re-init sent (clear stuck buzz)"); } };
 $("#ctlrOff").onclick=async()=>{ if(dev){ await send([0x08]); log("controller power-off attempt sent — watch link status"); } };
 $("#dfuSerial").onclick=async()=>{

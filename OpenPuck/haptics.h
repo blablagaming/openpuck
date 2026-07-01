@@ -106,6 +106,11 @@ bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq, uint8_t slot = 0);
 // queue + flush the pending host/test/stop relay inside the poll cadence (called from rf_link).
 // rfConnFlushRelay's s1 must carry a PID distinct from the GET poll that follows it (rf_link cycles the shared
 // PID counter), so the controller doesn't dedup the GET as a retransmit of the relay.
+// Stability test: when g_stabTest (WebUSB cmd 0x0F), buzz all controllers every 10s to keep them awake for an
+// unattended uptime-until-hang measurement. hapticStabTask() is called from loop().
+extern bool g_stabTest;
+void hapticStabTask();
+
 void rfConnQueueHapticRelay();
 // returns true if a relay frame was actually transmitted this call (queue had an entry), so the poll loop can
 // count relay TXs separately from poll cycles.

@@ -265,6 +265,8 @@ void setup()
 	NRF_WDT->CRV = 8UL * 32768UL - 1; // timeout in 32.768 kHz ticks (~8 s)
 	NRF_WDT->RREN = WDT_RREN_RR0_Msk; // arm reload register 0
 	NRF_WDT->TASKS_START = 1;
+	// Capture the stuck PC on the WDT's pre-reset interrupt (software stand-in for SWD on the clone hangs).
+	faultDiagArmHangCapture();
 }
 
 // loop-timing diagnostics: poll rate is capped by loop ITERATION time (pacing wants 4000us but the poll only
@@ -282,6 +284,8 @@ void loop()
 	// feed the watchdog; if we ever stop, the ~8s WDT auto-resets us
 	NRF_WDT->RR[0] = WDT_RR_RR_Reload;
 	faultDiagBeat(); // loop heartbeat -- the SOF blob reports ms-since-beat so a wedge is visible live
+	faultDiagStackTick(); // per-task stack headroom (self-gated ~1Hz) -- usbd-overflow hypothesis check
+	hapticStabTask(); // stability-test keepalive buzz (no-op unless armed via WebUSB)
 	// cross-check HFCLK(micros) vs LFCLK(millis) once a second -- cheap, both builds (clone clock diagnostic)
 	clockDiagTick();
 	if (g_dirty) {

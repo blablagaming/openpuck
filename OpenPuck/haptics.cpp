@@ -333,6 +333,29 @@ bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq, uint8_t slot)
 // haptics broadcast to all connected slots (slot 0xFF); the stop frame is broadcast too (a stuck latch can
 // affect any controller, and the haptic-engine clear-re-init is settings-only so it's harmless on healthy
 // ones).
+// Stability-test keepalive: while g_stabTest, buzz every connected controller for ~150ms once per 10s so an
+// unattended uptime measurement isn't ended by a controller idle-sleeping. Toggled by WebUSB cmd 0x0F; the
+// panel times uptime-until-reset. Reboots clear g_stabTest (the panel re-arms it on reconnect).
+bool g_stabTest = false;
+void hapticStabTask()
+{
+	if (!g_stabTest)
+		return;
+	static const uint8_t on[3] = { 0x01, 0x01, 0xF7 };
+	static const uint8_t off[3] = { 0x01, 0x01, 0x00 };
+	static unsigned long lastOn = 0, offAt = 0;
+	unsigned long now = millis();
+	if (lastOn == 0 || (uint32_t)(now - lastOn) >= 10000u) {
+		lastOn = now;
+		relayEnqueue(0x82, on, 3, 0xFF); // broadcast buzz-on to all slots
+		offAt = now + 150;
+	}
+	if (offAt && (int32_t)(now - offAt) >= 0) {
+		relayEnqueue(0x82, off, 3, 0xFF);
+		offAt = 0;
+	}
+}
+
 void rfConnQueueHapticRelay()
 {
 	if (relayPending())

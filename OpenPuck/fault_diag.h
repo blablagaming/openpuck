@@ -57,6 +57,19 @@ void faultDiagBeat();
 uint8_t faultDiagCurStage();
 uint32_t faultDiagStallMs();
 const char *faultDiagStageStr(uint8_t s);
+
+// Watchdog pre-reset PC capture ("software SWD"): arm in setup() right after NRF_WDT->TASKS_START. After a
+// watchdog hang, faultDiagHangPC()/LR() return the PC/LR of the stuck code (0 if the hang hard-masked
+// interrupts so the capture ISR couldn't run). Map the PC with addr2line on the build .elf.
+void faultDiagArmHangCapture();
+uint32_t faultDiagHangPC();
+uint32_t faultDiagHangLR();
+
+// Per-task stack headroom (words of stack never used = free). Call faultDiagStackTick() from loop() (self-gated
+// to ~1 Hz). faultDiagUsbdStackFree() trending toward 0 under haptic load confirms the usbd-task overflow.
+void faultDiagStackTick();
+uint16_t faultDiagUsbdStackFree();
+uint16_t faultDiagLoopStackFree();
 // Last-boot classification (RR_*) + the raw RESETREAS, for the WebUSB panel / console.
 uint8_t faultDiagReason();
 uint32_t faultDiagResetReas();

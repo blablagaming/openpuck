@@ -35,8 +35,8 @@ static volatile bool g_bondExportRequest = false;
 // p[6]/p[7]/p[8..11] mirror the ACTIVE type (legacy display). v11 extends to 113 bytes (115 total incl header);
 // browser reads with transferIn(128) to span the two USB-FS packets.
 //                [diag: crc/s][noRx/s][rfStallRecover count]
-//                [v12: relayps(lo,hi)][clkLfSrc][clkHfSrc][usPerMs(lo,hi)][hangStage][curStage][stallMs/40][ringFault(lo,hi)]
-#define WB_PAYLEN 127
+//                [v12: relayps(lo,hi)][clkLfSrc][clkHfSrc][usPerMs(lo,hi)][hangStage][curStage][stallMs/40][ringFault(lo,hi)][hangPC u32][hangLR u32][usbdStackFree(lo,hi)][loopStackFree(lo,hi)]
+#define WB_PAYLEN 139
 // The blob send is drop-on-full (never blocks loop), so the vendor TX FIFO MUST be able to hold a whole blob
 // -- otherwise tud_vendor_write_available() never reaches the frame size and EVERY frame is dropped (blank
 // panel / stale mappings). The Makefile sets -DCFG_TUD_VENDOR_TX_BUFSIZE=256; guard it here so a build without
@@ -187,6 +187,24 @@ static void webusbSendBlob()
 	// invisible IRQ-off watchdog hang. A climbing count points at the haptic relay path / memory corruption.
 	p[127] = (uint8_t)g_ringFault;
 	p[128] = (uint8_t)(g_ringFault >> 8);
+	// PC/LR of the stuck code captured by the WDT pre-reset ISR on the last watchdog hang (0 = none captured =
+	// the hang hard-masked interrupts). Map with addr2line on the .elf to name the function.
+	uint32_t hpc = faultDiagHangPC(), hlr = faultDiagHangLR();
+	p[129] = (uint8_t)hpc;
+	p[130] = (uint8_t)(hpc >> 8);
+	p[131] = (uint8_t)(hpc >> 16);
+	p[132] = (uint8_t)(hpc >> 24);
+	p[133] = (uint8_t)hlr;
+	p[134] = (uint8_t)(hlr >> 8);
+	p[135] = (uint8_t)(hlr >> 16);
+	p[136] = (uint8_t)(hlr >> 24);
+	// least-ever free stack (words) on the usbd task (800B total) and loop task -- usbd trending to 0 confirms
+	// the overflow. words, not bytes.
+	uint16_t usbdFree = faultDiagUsbdStackFree(), loopFree = faultDiagLoopStackFree();
+	p[137] = (uint8_t)usbdFree;
+	p[138] = (uint8_t)(usbdFree >> 8);
+	p[139] = (uint8_t)loopFree;
+	p[140] = (uint8_t)(loopFree >> 8);
 	// CRITICAL: usb_web.write() SPINS (`while (remain && _connected) yield();`) until the IN FIFO drains or the
 	// panel disconnects. If the panel holds the WebUSB interface open but stops reading its IN endpoint -- a
 	// backgrounded tab, or the host briefly not servicing transferIn under load -- the FIFO never empties and
@@ -323,16 +341,16 @@ void webusbPoll()
 			if (n == 0)
 				break;
 			uint8_t op = buf[0];
-			if (op < 0x01 || op > 0x0E) { // resync: drop one byte
+			if (op < 0x01 || op > 0x0F) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
 			}
-			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x05/0x0E carry one
-			// value byte; 0x02 a field+value; 0x0A a 3-byte magic.
+			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x05/0x0E/0x0F carry
+			// one value byte; 0x02 a field+value; 0x0A a 3-byte magic.
 			uint8_t need = (op == 0x0D)		      ? 27 :
 				       (op == 0x02)		      ? 3 :
 				       (op == 0x03 || op == 0x05 ||
-					op == 0x0E)		      ? 2 :
+					op == 0x0E || op == 0x0F)     ? 2 :
 				       (op == 0x0A)		      ? 4 :
 								        1;
 			if (n < need)
@@ -344,6 +362,11 @@ void webusbPoll()
 			// 0x09: export all bond slots (clone backup). One 0xA7 frame, sent from the usbd task.
 			else if (op == 0x09) {
 				g_bondExportRequest = true;
+			}
+			// 0x0F: stability test on/off -- when on, the puck buzzes all controllers every 10s to keep them
+			// awake so an unattended uptime-until-hang measurement isn't ended by a controller idle-sleeping.
+			else if (op == 0x0F) {
+				g_stabTest = (buf[1] != 0);
 			}
 #if OPK_LOG
 

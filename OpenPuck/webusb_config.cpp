@@ -18,6 +18,10 @@ Adafruit_USBD_WebUSB usb_web;
 // goes through the same blocking osd_queue_send path as HID sends, so doing it from loop() could stall the
 // loop and trip the watchdog under load -- with the panel open during heavy use that was a live risk.
 static volatile bool g_blobRequest = false;
+// Bond export ("clone" backup): a 0x09 panel command asks for a one-shot dump of all four bond slots so the
+// browser can save them to a file and restore them onto a second puck. Like the status blob, the actual send
+// is deferred to the usbd task (webusbSofDrain) so usb_web.write()/flush() never block loop().
+static volatile bool g_bondExportRequest = false;
 
 // blob payload = [ver=10][mode][mDiv][mFric][qamMap(active)][abSwap(active)][back0..3(active)][connSlot(0xFF=none)][linkUp]
 //                [f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub][fwdNewOnly]
@@ -31,7 +35,8 @@ static volatile bool g_blobRequest = false;
 // p[6]/p[7]/p[8..11] mirror the ACTIVE type (legacy display). v11 extends to 113 bytes (115 total incl header);
 // browser reads with transferIn(128) to span the two USB-FS packets.
 //                [diag: crc/s][noRx/s][rfStallRecover count]
-#define WB_PAYLEN 116
+//                [v12: relayps(lo,hi)][clkLfSrc][clkHfSrc][usPerMs(lo,hi)][hangStage][curStage][stallMs/40][ringFault(lo,hi)][hangPC u32][hangLR u32][usbdStackFree(lo,hi)][loopStackFree(lo,hi)]
+#define WB_PAYLEN 139
 // The blob send is drop-on-full (never blocks loop), so the vendor TX FIFO MUST be able to hold a whole blob
 // -- otherwise tud_vendor_write_available() never reaches the frame size and EVERY frame is dropped (blank
 // panel / stale mappings). The Makefile sets -DCFG_TUD_VENDOR_TX_BUFSIZE=256; guard it here so a build without
@@ -52,8 +57,8 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (11 = +reset cause; 10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
-	p[2] = 11;
+	// protocol version (12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
+	p[2] = 12;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -162,6 +167,44 @@ static void webusbSendBlob()
 	p[115] = (uint8_t)(g_crcps > 255 ? 255 : g_crcps);
 	p[116] = (uint8_t)(g_norxps > 255 ? 255 : g_norxps);
 	p[117] = (uint8_t)(g_rfStallRecover > 255 ? 255 : g_rfStallRecover);
+	// v12: relay-frame TX rate (separated from true poll cycles -- Polls/s now reads ~250, Relay/s exposes the
+	// host output-report flood that steals reply windows), and the clock fingerprint for clone-board triage.
+	p[118] = (uint8_t)g_relayps;
+	p[119] = (uint8_t)(g_relayps >> 8);
+	p[120] = clockLfSrc();
+	p[121] = clockHfSrc();
+	uint16_t upm = clockUsPerMs();
+	p[122] = (uint8_t)upm;
+	p[123] = (uint8_t)(upm >> 8);
+	// last hang's loop stage (0xFF = last boot wasn't a watchdog/lockup hang, or GPREGRET2 didn't survive)
+	p[124] = faultDiagHangStage();
+	// LIVE hang localization: current loop stage + how long loop() has been stuck (40ms units, capped). When
+	// loop() wedges these keep updating because the blob is sent from the SOF interrupt, not loop().
+	p[125] = faultDiagCurStage();
+	uint32_t sms = faultDiagStallMs();
+	p[126] = (uint8_t)(sms / 40 > 255 ? 255 : sms / 40);
+	// relay-ring fault count: non-zero = we caught+recovered a desynced/corrupt ring that would otherwise be an
+	// invisible IRQ-off watchdog hang. A climbing count points at the haptic relay path / memory corruption.
+	p[127] = (uint8_t)g_ringFault;
+	p[128] = (uint8_t)(g_ringFault >> 8);
+	// PC/LR of the stuck code captured by the WDT pre-reset ISR on the last watchdog hang (0 = none captured =
+	// the hang hard-masked interrupts). Map with addr2line on the .elf to name the function.
+	uint32_t hpc = faultDiagHangPC(), hlr = faultDiagHangLR();
+	p[129] = (uint8_t)hpc;
+	p[130] = (uint8_t)(hpc >> 8);
+	p[131] = (uint8_t)(hpc >> 16);
+	p[132] = (uint8_t)(hpc >> 24);
+	p[133] = (uint8_t)hlr;
+	p[134] = (uint8_t)(hlr >> 8);
+	p[135] = (uint8_t)(hlr >> 16);
+	p[136] = (uint8_t)(hlr >> 24);
+	// least-ever free stack (words) on the usbd task (800B total) and loop task -- usbd trending to 0 confirms
+	// the overflow. words, not bytes.
+	uint16_t usbdFree = faultDiagUsbdStackFree(), loopFree = faultDiagLoopStackFree();
+	p[137] = (uint8_t)usbdFree;
+	p[138] = (uint8_t)(usbdFree >> 8);
+	p[139] = (uint8_t)loopFree;
+	p[140] = (uint8_t)(loopFree >> 8);
 	// CRITICAL: usb_web.write() SPINS (`while (remain && _connected) yield();`) until the IN FIFO drains or the
 	// panel disconnects. If the panel holds the WebUSB interface open but stops reading its IN endpoint -- a
 	// backgrounded tab, or the host briefly not servicing transferIn under load -- the FIFO never empties and
@@ -176,13 +219,52 @@ static void webusbSendBlob()
 	}
 }
 
+// Bond export frame (panel "Export config to file"). One self-describing frame carrying all four bond slots so
+// the browser can clone a puck onto another without re-pairing:
+//   [0xA7][len][ver=1][usedMask][slot0 rec 24]...[slot3 rec 24]   (len = 2 + NSLOT*24 = 98)
+// usedMask bit s = slot s bonded. The session RF address is NOT exported: each puck re-derives it from the bond
+// UUID + its own FICR DEVICEID at boot, and the bonded controller relearns it from the E1 host beacon on every
+// reconnect (rf_link.cpp) -- so the 24-byte record is the whole portable identity. 98+2 < transferIn(128) and
+// < CFG_TUD_VENDOR_TX_BUFSIZE (256), so it sends whole in one drop-on-full write like the status blob.
+#define WB_BOND_PAYLEN (2 + NSLOT * 24)
+static void webusbSendBondExport()
+{
+	if (!usb_web.connected())
+		return;
+	uint8_t p[2 + WB_BOND_PAYLEN];
+	p[0] = 0xA7;
+	p[1] = WB_BOND_PAYLEN;
+	p[2] = 1; // format version
+	uint8_t mask = 0;
+	for (int s = 0; s < NSLOT; s++) {
+		if (g_slot[s].used)
+			mask |= (uint8_t)(1u << s);
+		memcpy(&p[4 + s * 24], g_slot[s].rec, 24);
+	}
+	p[3] = mask;
+	// Same anti-hang rule as the status blob: drop the frame if the FIFO can't take it whole, never spin.
+	if (tud_vendor_write_available() >= sizeof p) {
+		usb_web.write(p, sizeof p);
+		usb_web.flush();
+	}
+}
+
 // Runs on the usbd task (registered via usbTxRegisterDrain -> tud_sof_cb). Sends the blob if loop() asked for
 // one. Keeps every usb_web write/flush off the loop task so it can't block on the device event queue.
 static void webusbSofDrain(void)
 {
+	// If loop() has stopped beating, it's wedged -- keep pushing the blob (which carries the live stuck stage)
+	// so the panel shows WHERE it hung during the ~8s before the watchdog fires. This runs on the SOF IRQ, so
+	// it works even though loop() is dead. drop-on-full in webusbSendBlob keeps it from ever blocking.
+	if (faultDiagStallMs() > 300)
+		g_blobRequest = true;
 	if (g_blobRequest) {
 		g_blobRequest = false;
 		webusbSendBlob();
+	}
+	if (g_bondExportRequest) {
+		g_bondExportRequest = false;
+		webusbSendBondExport();
 	}
 }
 // Register the SOF drain. Call once from setup() (harmless even if WebUSB isn't enumerated -- webusbSendBlob
@@ -244,7 +326,9 @@ static void webusbDrainCapture()
 #endif // OPK_LOG
 void webusbPoll()
 {
-	static uint8_t buf[16];
+	// 40 B holds the largest command: 0x0D writes one bond slot = [0x0D][slot][used][24 rec] = 27 B (still
+	// inside one 64-B USB-FS OUT packet, so no command ever spans packets). Every other command is <= 4 B.
+	static uint8_t buf[40];
 	static uint8_t n = 0;
 	while (usb_web.available()) {
 		int c = usb_web.read();
@@ -257,21 +341,37 @@ void webusbPoll()
 			if (n == 0)
 				break;
 			uint8_t op = buf[0];
-
-			// 0x05 carries a value byte; 0x0A carries a 3-byte magic
-			uint8_t need = (op == 0x02)		  ? 3 :
-				       (op == 0x03 || op == 0x05) ? 2 :
-				       (op == 0x0A)		  ? 4 :
-								    1;
-			if (op < 0x01 || op > 0x0C) { // resync: drop one byte
+			if (op < 0x01 || op > 0x0F) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
 			}
+			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x05/0x0E/0x0F carry
+			// one value byte; 0x02 a field+value; 0x0A a 3-byte magic.
+			uint8_t need = (op == 0x0D)		      ? 27 :
+				       (op == 0x02)		      ? 3 :
+				       (op == 0x03 || op == 0x05 ||
+					op == 0x0E || op == 0x0F)     ? 2 :
+				       (op == 0x0A)		      ? 4 :
+								        1;
 			if (n < need)
 				break; // wait for more bytes
 			if (op == 0x01) {
 				g_blobRequest =
 					true; // sent from the usbd task (webusbSofDrain)
+			}
+			// 0x09: export all bond slots (clone backup). One 0xA7 frame, sent from the usbd task.
+			else if (op == 0x09) {
+				g_bondExportRequest = true;
+			}
+			// 0x0F: stability test on/off. Puck->controller haptics do NOT reset the controller's own
+			// user-input idle auto-off (we already poll it every 4ms without keeping it awake), so instead
+			// signal host-awake: enable the E7 announce (0xE7 00 00 = host-awake vs 00 01 = suspended, per
+			// the RE) so the controller is told the host is active and (hopefully) doesn't power-save. The
+			// 10s buzz stays -- it also exercises the haptic-relay path that correlates with the hang.
+			else if (op == 0x0F) {
+				g_stabTest = (buf[1] != 0);
+				g_e7b = 0; // byte2=0 => host-awake
+				g_e7announce = g_stabTest;
 			}
 #if OPK_LOG
 
@@ -319,6 +419,38 @@ void webusbPoll()
 				delay(40);
 				faultDiagArmIntentionalReset();
 				enterUf2Dfu();
+
+				// 0x0D: write ONE bond slot into RAM -- the "clone onto this puck" side of Export/Import.
+				// [0x0D][slot][used][24 rec]. used=0 (or an empty record) clears the slot. The panel sends
+				// one of these per slot, then a 0x0E to persist + reboot. Kept to a single small command
+				// (<=27 B) so it never spans a USB packet, and acked with a status blob so the panel's
+				// read-after-write keeps the OUT pipe flowing (same shape as the proven 0x02 setters).
+			} else if (op == 0x0D) {
+				uint8_t slot = buf[1], used = buf[2];
+				if (slot < NSLOT) {
+					if (used && !recEmpty(buf + 3)) {
+						memcpy(g_slot[slot].rec, buf + 3,
+						       24);
+						g_slot[slot].used = true;
+					} else {
+						memset(g_slot[slot].rec, 0, 24);
+						g_slot[slot].used = false;
+					}
+				}
+				g_blobRequest = true; // ack
+
+				// 0x0E: commit an import -- persist the bond slots written by 0x0D, optionally apply a USB
+				// mode ([0x0E][mode]; 0xFF = leave unchanged), then reboot so the RF session addresses
+				// regenerate from the new bond UUIDs.
+			} else if (op == 0x0E) {
+				uint8_t mode = buf[1];
+				saveBonds();
+				if (modeValid(mode))
+					saveMode(mode);
+				usb_web.flush();
+				delay(40);
+				faultDiagArmIntentionalReset();
+				NVIC_SystemReset();
 
 			} else if (op == 0x02) {
 				uint8_t f = buf[1], v = buf[2];
@@ -459,18 +591,7 @@ void webusbPoll()
 					break; // Switch Pro gyro scale x10
 
 				// (field 25, poll RX window, removed -- g_rxWin is now FIXED/not configurable)
-
-				// post-connect haptic block enable: drop Steam haptics for g_hapticBlockMs after a connect
-				case 27:
-					g_hapticBlockOn = v ? 1 : 0;
-					break;
-
-				// post-connect haptic block duration, in seconds (clamp 0..60)
-				case 28:
-					g_hapticBlockMs =
-						(uint16_t)((v > 60 ? 60 : v) *
-							   1000u);
-					break;
+				// (fields 27/28, post-connect haptic block, removed -- permanently disabled)
 				}
 				if (persist)
 					saveCfg();

@@ -237,6 +237,9 @@ void setup()
 	// Classify why we (re)booted: distinguishes a watchdog hang from a HardFault from an intentional reboot
 	// (issue #72 -- those are conflated in the field). Surfaced on the WebUSB panel too.
 	faultDiagBoot();
+	// Clock fingerprint: which crystals/oscillators this (possibly clone) board actually came up on. Surfaced
+	// on the panel so flaky clones can be told apart from the known-good board.
+	clockDiagBoot();
 	if (puckMode)
 		Serial.printf(
 			"# puck USB: %s\n",
@@ -267,6 +270,8 @@ void setup()
 	NRF_WDT->CRV = 8UL * 32768UL - 1; // timeout in 32.768 kHz ticks (~8 s)
 	NRF_WDT->RREN = WDT_RREN_RR0_Msk; // arm reload register 0
 	NRF_WDT->TASKS_START = 1;
+	// Capture the stuck PC on the WDT's pre-reset interrupt (software stand-in for SWD on the clone hangs).
+	faultDiagArmHangCapture();
 }
 
 // loop-timing diagnostics: poll rate is capped by loop ITERATION time (pacing wants 4000us but the poll only
@@ -283,6 +288,11 @@ void loop()
 {
 	// feed the watchdog; if we ever stop, the ~8s WDT auto-resets us
 	NRF_WDT->RR[0] = WDT_RR_RR_Reload;
+	faultDiagBeat(); // loop heartbeat -- the SOF blob reports ms-since-beat so a wedge is visible live
+	faultDiagStackTick(); // per-task stack headroom (self-gated ~1Hz) -- usbd-overflow hypothesis check
+	hapticStabTask(); // stability-test keepalive buzz (no-op unless armed via WebUSB)
+	// cross-check HFCLK(micros) vs LFCLK(millis) once a second -- cheap, both builds (clone clock diagnostic)
+	clockDiagTick();
 	if (g_dirty) {
 		g_dirty = false;
 		saveBonds();
@@ -294,28 +304,37 @@ void loop()
 	static unsigned long secMs = 0;
 	uint32_t t;
 	t = micros();
+	faultDiagSetStage(0);
 	webusbPoll();
 	acc[0] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(1);
 	if (g_active)
 		g_active->task();
 	acc[1] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(2);
 	serialConsolePoll();
 	acc[2] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(3);
 	rfDiagTask();
 	acc[3] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(4);
 	rfLinkTask();
 	acc[4] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(5);
 	hapticTask();
 	acc[5] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(6);
 	ledTask();
 	acc[6] += (uint32_t)(micros() - t);
+	faultDiagSetStage(7);
 	usbMountTask(); // dynamic mount/unmount of connected controllers (no-op unless enabled)
+	faultDiagSetStage(8);
 	usbTxPump(); // drain queued device->host reports HERE, in loop -- never off-loop (jitters the RF poll)
 	loops++;
 	if (millis() - secMs >= 1000) {
@@ -335,15 +354,26 @@ void loop()
 		secMs = millis();
 	}
 #else
+	// faultDiagSetStage breadcrumb (GPREGRET2) before each stage: if loop() wedges, the watchdog reset's next
+	// boot reports which stage was stuck. Cheap (one register write each).
+	faultDiagSetStage(0);
 	webusbPoll();
+	faultDiagSetStage(1);
 	if (g_active)
 		g_active->task();
+	faultDiagSetStage(2);
 	serialConsolePoll();
+	faultDiagSetStage(3);
 	rfDiagTask();
+	faultDiagSetStage(4);
 	rfLinkTask();
+	faultDiagSetStage(5);
 	hapticTask();
+	faultDiagSetStage(6);
 	ledTask();
+	faultDiagSetStage(7);
 	usbMountTask(); // dynamic mount/unmount of connected controllers (no-op unless enabled)
+	faultDiagSetStage(8);
 	usbTxPump(); // drain queued device->host reports HERE, in loop -- never off-loop (jitters the RF poll)
 #endif
 }

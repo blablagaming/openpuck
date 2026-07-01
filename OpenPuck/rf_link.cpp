@@ -101,6 +101,11 @@ int g_curSlot = -1;
 static uint8_t g_pollPid[NSLOT] = {};
 static uint8_t g_relayPid[NSLOT] = {};
 static uint32_t g_stPoll = 0, g_stF1 = 0, g_stF3 = 0;
+// g_stPoll counts true poll CYCLES (one E3 GET per warm slot per cycle). g_stRelay counts relay frames TX'd
+// (host/haptic output reports). They were conflated before (every rfConnTx bumped one counter), which made
+// "Polls/s" read ~540 (250 polls + ~290 relays) and hid that each relay steals a reply window from its poll.
+static uint32_t g_stRelay = 0;
+uint16_t g_relayps = 0;
 static unsigned long g_stMs = 0;
 // Per-slot dedupe seq + per-slot new-report counter (the real puck sends 0x45 per controller; merging all
 // slots into a single sequence makes one controller "swallow" the other's frame).
@@ -258,7 +263,6 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 			    RADIO_SHORTS_DISABLED_RSSISTOP_Msk;
 	NRF_RADIO->EVENTS_END = 0;
 	NRF_RADIO->TASKS_RXEN = 1;
-	g_stPoll++;
 	uint32_t t0 = micros();
 	while (!NRF_RADIO->EVENTS_END && (micros() - t0) < win) {
 	} // RX window (tunable 'r'; or relay override)
@@ -748,7 +752,8 @@ static void rfConnStep()
 		{
 			uint8_t rs1 =
 				(uint8_t)((((g_relayPid[k]++) & 3) << 1) | 1);
-			rfConnFlushRelay(ch, rs1);
+			if (rfConnFlushRelay(ch, rs1))
+				g_stRelay++;
 		}
 		// per-slot PID cycle so each bonded controller's polls stay distinct
 		uint8_t pidv = g_pollPid[k]++;
@@ -768,18 +773,27 @@ static void rfConnStep()
 		}
 		if (rx)
 			g_chF1[0]++;
+		g_stPoll++; // one true poll cycle for this slot
 		g_connPoll++;
 	};
 
-	// Poll every warm slot this cycle. "Cold" = was connected, now silent > SLOT_COLD_MS;
-	// those are retried only every SLOT_COLD_RETRY_MS. Never-replied slots count as warm so
-	// a controller that connects at any time gets the full poll rate to establish its link.
+	// Poll a slot every cycle (full rate) only when its controller is actually here. Throttle the rest to
+	// every SLOT_COLD_RETRY_MS:
+	//   - "cold": WAS connected but silent > SLOT_COLD_MS (controller powered off / out of range);
+	//   - "phantom": NEVER replied AND another controller is already connected. This is the cloned-puck case
+	//     (issue: bonds copied from a backup include controllers that aren't present). Polling a phantom slot
+	//     every cycle was doubling/tripling Polls/s, flooding noRx, and stealing reply windows from the live
+	//     controller. A never-replied slot with nothing else connected still polls full-rate, so the FIRST
+	//     controller connects instantly; a phantom only backs off once a real link exists to protect.
+	bool linkUp = anySlotLinkUp();
 	for (int k = 0; k < NSLOT; k++) {
 		if (!g_slot[k].used)
 			continue;
-		bool cold = g_connReplyMs[k] != 0 &&
-			    nowMs - g_connReplyMs[k] > SLOT_COLD_MS;
-		if (cold && nowMs - g_slotLastAttemptMs[k] < SLOT_COLD_RETRY_MS)
+		bool everReplied = g_connReplyMs[k] != 0;
+		bool cold = everReplied && (nowMs - g_connReplyMs[k] > SLOT_COLD_MS);
+		bool phantom = !everReplied && linkUp;
+		if ((cold || phantom) &&
+		    nowMs - g_slotLastAttemptMs[k] < SLOT_COLD_RETRY_MS)
 			continue;
 		doPoll(k);
 	}
@@ -898,6 +912,7 @@ void rfLinkTask()
 		g_f1ps = g_stF1;
 		g_newps = g_stNew;
 		g_pollsps = (uint16_t)g_stPoll;
+		g_relayps = (uint16_t)g_stRelay;
 		g_crcps = (uint16_t)g_stCrc;
 		g_norxps = (uint16_t)g_stNoRx;
 		g_pollPeriodUs =
@@ -913,6 +928,7 @@ void rfLinkTask()
 				(unsigned long)g_stCrc, (unsigned long)g_stNoRx,
 				g_curSlot);
 		g_stPoll = 0;
+		g_stRelay = 0;
 		g_stF1 = 0;
 		g_stNew = 0;
 		g_stF3 = 0;

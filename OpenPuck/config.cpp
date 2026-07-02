@@ -76,10 +76,9 @@ const uint32_t g_pollUs = POLL_US_DEFAULT;
 struct Cfg {
 	uint8_t magic, mode, mDiv, mFric, rsvd0, pollU100, persistMode,
 		bootMode, chordBtn[3], rumbleScale;
-	// rxWin10: legacy RF tunable slot (window now fixed; ignored). lizKeep: the lizard-suppression
-	// keepalive enable (see haptics.h LIZKEEP_MS) -- repurposed from the dead post-connect haptic-block
-	// bytes. rsvd1: the block's old duration byte, free for the next tunable.
-	uint8_t rxWin10, lizKeep, rsvd1;
+	// rxWin10: legacy RF tunable slot (window now fixed; ignored). lizKeep: the id9=0 hold enable (see
+	// haptics.h LIZKEEP_MS). landAll87: the verbatim-0x87-relay experiment toggle (haptics.h g_landAll87).
+	uint8_t rxWin10, lizKeep, landAll87;
 	TypeCfg type[ET_COUNT]; // per-emulated-type back/qam/abSwap/padHaptics
 }; // rsvd0 = ex-padSmooth, now the one-shot debug-CDC arm
 
@@ -97,7 +96,7 @@ void saveCfg()
 		  g_rumbleScale,
 		  (uint8_t)(g_rxWin / 10),
 		  g_lizKeep,
-		  0,
+		  g_landAll87,
 		  {} };
 	for (int i = 0; i < ET_COUNT; i++)
 		c.type[i] = g_type[i];
@@ -156,6 +155,9 @@ void loadCfg()
 			// through -> keep the on default)
 			if (c.lizKeep <= 1)
 				g_lizKeep = c.lizKeep;
+			// verbatim-0x87-relay experiment toggle (0/1; default off)
+			if (c.landAll87 <= 1)
+				g_landAll87 = c.landAll87;
 			// The poll RX window is now FIXED (g_rxWin is const) -- any persisted rxWin10 is ignored.
 		}
 		f.close();

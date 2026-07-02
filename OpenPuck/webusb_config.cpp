@@ -38,7 +38,8 @@ static volatile bool g_bondExportRequest = false;
 //                [v12: relayps(lo,hi)][clkLfSrc][clkHfSrc][usPerMs(lo,hi)][hangStage][curStage][stallMs/40][ringFault(lo,hi)][hangPC u32][hangLR u32][usbdStackFree(lo,hi)][loopStackFree(lo,hi)]
 //                [v13: per-slot link stats, 4x9B from p[141]: {pollsps u16, f1ps u16, newps u16, crc/s u8,
 //                 noRx/s u8, relay/s u8} -- each controller's own rates (the v4 aggregates are their sums)]
-#define WB_PAYLEN 175
+//                [v14: p[177] landAll87 (verbatim-0x87-relay experiment toggle)]
+#define WB_PAYLEN 176
 // The blob send is drop-on-full (never blocks loop), so the vendor TX FIFO MUST be able to hold a whole blob
 // -- otherwise tud_vendor_write_available() never reaches the frame size and EVERY frame is dropped (blank
 // panel / stale mappings). The Makefile sets -DCFG_TUD_VENDOR_TX_BUFSIZE=256; guard it here so a build without
@@ -59,8 +60,8 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (13 = +per-slot link stats; 12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
-	p[2] = 13;
+	// protocol version (14 = +landAll87 toggle; 13 = +per-slot link stats; 12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
+	p[2] = 14;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -222,6 +223,8 @@ static void webusbSendBlob()
 		q[7] = g_slotNoRxps[s];
 		q[8] = g_slotRelayps[s];
 	}
+	// v14: verbatim-0x87-relay experiment toggle (panel reflects + toggles it)
+	p[177] = g_landAll87;
 	// CRITICAL: usb_web.write() SPINS (`while (remain && _connected) yield();`) until the IN FIFO drains or the
 	// panel disconnects. If the panel holds the WebUSB interface open but stops reading its IN endpoint -- a
 	// backgrounded tab, or the host briefly not servicing transferIn under load -- the FIFO never empties and
@@ -610,6 +613,12 @@ void webusbPoll()
 
 					// (field 25, poll RX window, removed -- g_rxWin is now FIXED/not configurable)
 					// (fields 27/28, post-connect haptic block, removed -- permanently disabled)
+
+				// EXPERIMENT: land ALL relayed 0x87 config verbatim (real-puck relay)
+				// instead of the discard-whitelist. Persisted; blob p[177] reflects state.
+				case 29:
+					g_landAll87 = v ? 1 : 0;
+					break;
 				}
 				if (persist)
 					saveCfg();

@@ -4,6 +4,7 @@
 #include "config.h"
 #include "triton.h"
 #include "haptics.h"
+#include "puck_hid.h" // g_cmdCapture (suppress I45 during feature-command capture)
 #include "controllers.h"
 #include "status_led.h"
 #include "fault_diag.h"
@@ -76,6 +77,14 @@ uint16_t g_rfStallRecover = 0;
 // not merely blipping. RF_RECOVER_MS rate-limits the recovery so it can't thrash while a stalled link re-syncs.
 #define RF_STALL_MS 2500u
 #define RF_RECOVER_MS 2000u
+// A genuinely WEDGED radio recovers within a power-cycle or two; a controller that is simply OFF / out of
+// range never comes back no matter how many times we power-cycle. So after RF_STALL_GIVEUP consecutive
+// recoveries that restored NO link, treat it as "controller absent" and stop hammering: back the power-cycle
+// off to RF_STALL_BACKOFF_MS (a slow safety-net kick). Discovery beacons keep running throughout, so a
+// returning controller still reconnects normally without the power-cycle -- and the aggressive 2s cadence was
+// both wasteful and able to disrupt a controller mid-reconnect. The counter resets the moment any slot replies.
+#define RF_STALL_GIVEUP 3u
+#define RF_STALL_BACKOFF_MS 30000u
 // measured avg us between GET-poll fires (vs intended g_pollUs)
 uint16_t g_pollPeriodUs = 0;
 static uint32_t g_pollDtSum = 0;
@@ -305,8 +314,31 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 				// (e.g. a power-cycled controller that reconnects without us cleanly seeing the link drop).
 				if (g_connReplyMs[s] == 0 ||
 				    (uint32_t)(millis() - g_connReplyMs[s]) >
-					    1500u)
+					    1500u) {
+					// Lifecycle log (CDC debug boot): distinguish a first-ever connect from a reconnect and
+					// print the silent gap -- lets a long session of connect/disconnect cycles be diffed to
+					// see whether each cycle re-establishes (churn / boot-haptic click) vs stays linked.
+					if (Serial.availableForWrite() > 50) {
+						uint32_t gap =
+							g_connReplyMs[s] ?
+								(uint32_t)(millis() -
+									   g_connReplyMs
+										   [s]) :
+								0;
+						Serial.printf(
+							"# LC t=%lu slot%d %s gap=%lums rtype=%02X cd=%lums\n",
+							(unsigned long)millis(),
+							s,
+							g_connReplyMs[s] ?
+								"RECONNECT" :
+								"CONNECT",
+							(unsigned long)gap,
+							rtype,
+							(unsigned long)(millis() -
+									g_connCooldown));
+					}
 					hapticOnReconnect(s);
+				}
 				g_connRx++;
 				// link alive -> loop() suppresses the redundant E1 beacon
 				g_connReplyMs[s] = millis();
@@ -338,6 +370,17 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						others++;
 				if (others == 0)
 					g_connCooldown = millis();
+				// Lifecycle log: the controller sent F2 (disconnect/power-off). Note whether it armed the
+				// 2.5s cooldown (which pauses ALL beacon+poll -> the controller can lose the session and
+				// reboot on the next reconnect = a boot-haptic click). Prime suspect for the connect buzz.
+				if (Serial.availableForWrite() > 50)
+					Serial.printf(
+						"# LC t=%lu slot%d F2 DISCONNECT others=%d%s\n",
+						(unsigned long)millis(),
+						g_curSlot, others,
+						others == 0 ?
+							" -> cooldown 2.5s (beacon+poll paused)" :
+							"");
 			}
 			// F3 = controller status/version reply (reply to E7 handshake, byte[6]=version)
 			if (rtype == 0xF3) {
@@ -678,6 +721,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 				// compact stream for rf_controller_ui.py -- NON-BLOCKING: skip if CDC TX is backed up (a blocking
 				// Serial.print stalls the RF+USB loop -> jaggy input). One line/frame using the last record.
 				if (lastRep && !g_connVerbose &&
+				    !g_cmdCapture &&
 				    Serial.availableForWrite() > 110 &&
 				    millis() - g_lastStream >= 4) {
 					g_lastStream = millis();
@@ -897,6 +941,7 @@ void rfLinkTask()
 	// cannot thrash. g_rfStallRecover is surfaced to the panel so the wedge -- and its recovery -- is observable.
 	if (g_connOn && g_curSlot >= 0 && millis() - g_connCooldown > 2500) {
 		static unsigned long lastRecoverMs = 0;
+		static uint8_t consecStall = 0;
 		unsigned long nowMs2 = millis();
 		bool anyEverConnected = false, allStalled = true;
 		for (int s = 0; s < NSLOT; s++) {
@@ -906,10 +951,20 @@ void rfLinkTask()
 			if ((uint32_t)(nowMs2 - g_connReplyMs[s]) < RF_STALL_MS)
 				allStalled = false;
 		}
+		// Any slot alive -> a recovery worked (or we were never stalled): reset the give-up counter.
+		if (!allStalled)
+			consecStall = 0;
+		// Back off once we've power-cycled RF_STALL_GIVEUP times with nothing coming back (controller absent,
+		// not a wedged radio): slow the retry to RF_STALL_BACKOFF_MS instead of hammering every RF_RECOVER_MS.
+		uint32_t interval = (consecStall < RF_STALL_GIVEUP) ?
+					    RF_RECOVER_MS :
+					    RF_STALL_BACKOFF_MS;
 		if (anyEverConnected && allStalled &&
-		    (uint32_t)(nowMs2 - lastRecoverMs) > RF_RECOVER_MS) {
+		    (uint32_t)(nowMs2 - lastRecoverMs) > interval) {
 			lastRecoverMs = nowMs2;
 			g_rfStallRecover++;
+			if (consecStall < 255)
+				consecStall++;
 			NRF_RADIO->POWER = 0;
 			NRF_RADIO->POWER = 1;
 			g_connCooldown = 0;
@@ -917,8 +972,11 @@ void rfLinkTask()
 			g_connStep = 0;
 			if (Serial.availableForWrite() > 60)
 				Serial.printf(
-					"# RF STALL (#%u) -> radio power-cycle + reconnect\n",
-					g_rfStallRecover);
+					"# RF STALL (#%u consec=%u%s) -> radio power-cycle + reconnect\n",
+					g_rfStallRecover, consecStall,
+					consecStall >= RF_STALL_GIVEUP ?
+						" BACKOFF" :
+						"");
 		}
 	}
 

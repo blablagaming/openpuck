@@ -29,6 +29,7 @@ using namespace Adafruit_LittleFS_Namespace;
 #include "controllers.h"
 #include "haptics.h"
 #include "rf_link.h"
+#include "puck_hid.h" // puckCmdLogDrain()
 #include "rf_diag.h"
 #include "webusb_config.h"
 #include "serial_console.h"
@@ -336,6 +337,7 @@ void loop()
 	usbMountTask(); // dynamic mount/unmount of connected controllers (no-op unless enabled)
 	faultDiagSetStage(8);
 	usbTxPump(); // drain queued device->host reports HERE, in loop -- never off-loop (jitters the RF poll)
+	puckCmdLogDrain(); // print captured USB feature commands (diagnostic; no-op unless g_cmdCapture)
 	loops++;
 	if (millis() - secMs >= 1000) {
 		g_loopPeriodUs = loops ? (uint16_t)(1000000UL / loops) : 0;
@@ -375,5 +377,6 @@ void loop()
 	usbMountTask(); // dynamic mount/unmount of connected controllers (no-op unless enabled)
 	faultDiagSetStage(8);
 	usbTxPump(); // drain queued device->host reports HERE, in loop -- never off-loop (jitters the RF poll)
+	puckCmdLogDrain(); // print captured USB feature commands (diagnostic; no-op unless g_cmdCapture)
 #endif
 }

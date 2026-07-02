@@ -47,14 +47,21 @@
 bool relayEnqueue(uint8_t rid, const uint8_t *payload, uint8_t plen,
 		  uint8_t slot = 0xFF);
 
-// Lizard-suppression keepalive: hold the controller's SET_SETTINGS index 9 (digital-mappings/lizard-active)
-// at 0, once per LIZKEEP_MS per connected slot, exactly like the real puck (Steam lands id9=0 every 3.000s,
-// sniff1.json). Without the hold, the controller's revert timer (ibex FUN_0004265c) re-enables autonomous
-// mode and resets ALL settings to defaults -> amp pop + autonomous touchpad ticks = spurious buzz with zero
-// host/RF traffic. 2s cadence = comfortable margin under the (unmeasured, SC1-era ~5s) revert timeout.
+// id9=0 hold (MODE_STEAM only): land the controller's SET_SETTINGS index 9 (digital-mappings/lizard-active)
+// at 0, once per LIZKEEP_MS per connected slot, like the real puck. This holds the controller's autonomous
+// mapping/haptic engine OFF so it can't latch into the deep-inside buzz seen after repeated reconnects
+// (capture-for-haptics.txt: the buzz is controller-internal; OpenPuck relays no haptics in that state). It
+// also disables the controller's autonomous touchpad ticks (id9 gates the whole pad layer) -- fine in Steam
+// mode (Steam owns haptics), so it is scoped to MODE_STEAM; pure MODE_LIZARD is left alone to keep its ticks.
 #define LIZKEEP_MS 2000u
 extern uint8_t
-	g_lizKeep; // 1 = keepalive on (default, persisted); console 'u' toggles for A/B
+	g_lizKeep; // 1 = hold on (default, persisted); console 'u' toggles for A/B
+// Experiment: land ALL relayed 0x87 SET_SETTINGS verbatim (real-puck relay) instead of the discard-whitelist.
+// Default 0 (whitelist). Console "L87" toggles; persisted. See haptics.cpp for the buzz hypothesis it tests.
+extern uint8_t g_landAll87;
+// Land Steam's amp/haptic-config 0x87 (regs 0x18/0x2E/0x34/0x35, not gyro 0x30) so haptics play as clean
+// ticks not a default-amp buzz. On by default; console "AMP" toggles.
+extern uint8_t g_landAmp;
 
 // Post-connect haptic block (persisted, panel-controlled): when g_hapticBlockOn, Steam haptics are dropped for
 // g_hapticBlockMs after a (re)connect so the controller's haptic engine settles before the first real haptic.

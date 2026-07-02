@@ -19,9 +19,23 @@ volatile uint8_t g_hapticStop = 0;
 // Off by default -- opt in from the WebUSB panel if a controller's haptics come up degraded after connect.
 uint8_t g_hapticBlockOn = 0;
 uint16_t g_hapticBlockMs = HAPTIC_BLOCK_MS_DEFAULT;
-// Lizard-suppression keepalive (see hapticTask): OFF by default (it silences autonomous touchpad haptics;
-// Steam sends its own id9=0 anyway). Persisted; console 'u' toggles for A/B.
-uint8_t g_lizKeep = 0;
+// id9=0 hold in MODE_STEAM (see hapticTask): ON by default -- keeps the controller's autonomous haptic engine
+// off so it can't latch into the deep-inside buzz. Scoped to MODE_STEAM (pure MODE_LIZARD keeps its ticks).
+// Persisted; console 'u' toggles for A/B.
+uint8_t g_lizKeep = 1;
+// EXPERIMENT (console "L87" toggles, persisted): land ALL relayed 0x87 SET_SETTINGS via type-01 framing so
+// Steam's haptic/amp/IMU config actually reaches the controller (verbatim relay = real-puck behavior),
+// instead of the whitelist discarding everything but LED(0x2D)/id9(0x09). Hypothesis: the buzz is the
+// controller's haptic engine left MISCONFIGURED because Steam's 0x87 config is discarded; landing it should
+// configure the engine correctly and stop the buzz. Default OFF (keeps the safe whitelist) because landing
+// reg 0x30 was once blamed for freezing the gyro and 0x34/0x35 for the buzz -- but those were OpenPuck's own
+// bad hapticReinit values, so Steam's real values may be fine. Flip it on hardware to test; flip back if the
+// gyro freezes.
+uint8_t g_landAll87 = 0;
+// Land Steam's amp/haptic-config 0x87 blocks (regs 0x18/0x2E/0x34/0x35, NOT gyro 0x30) so the controller's
+// amplifier is configured and haptics play as clean ticks instead of a default-amp buzz. On by default;
+// console "AMP" toggles for A/B. See the land01 whitelist in rfConnFlushRelay.
+uint8_t g_landAmp = 1;
 // Per-slot reconnect block. 0 = idle; non-zero = drop haptics aimed at this slot until millis() catches up.
 unsigned long g_hapticBlockUntil[NSLOT] = { 0 };
 
@@ -416,11 +430,25 @@ bool rfConnFlushRelay(uint8_t ch, uint8_t s1)
 			// autonomous touchpad ticks = the spurious mid-session buzz). Other 0x87 writes (e.g. reg
 			// 0x30 IMU enable, 0x34/0x35 haptic amplitude) must stay on legacy form -- landing 0x30
 			// freezes the gyro; landing 0x34/0x35 causes the connect buzz.
+			// Amp/haptic-config registers (0x18/0x2E/0x34/0x35): LAND these so the controller's amplifier is
+			// configured the way Steam intends -> haptics (0x82 ticks, connect cue) play as clean ticks
+			// instead of the default-amp BUZZ we get when the config is discarded. Steam sends these grouped
+			// in 0x87 blocks that START with one of those regs and do NOT contain 0x30 (the gyro reg, which
+			// must NOT land -- it freezes the gyro), so gating on data[0] lands the amp block without 0x30.
+			// (g_landAmp, console "AMP"; on by default. The old "landing 0x34/0x35 buzzes" note was really the
+			// 0x81 storm, now removed.)
+			bool ampReg = (m.data[0] == 0x18 || m.data[0] == 0x2E ||
+				       m.data[0] == 0x34 || m.data[0] == 0x35);
 			bool land01 =
 				(m.rid == 0x9F) ||
 				(m.rid == 0x87 && rl >= 1 &&
 				 m.data[0] == 0x2D) ||
-				(m.rid == 0x87 && rl == 3 && m.data[0] == 0x09);
+				(m.rid == 0x87 && rl == 3 &&
+				 m.data[0] == 0x09) ||
+				(g_landAmp && m.rid == 0x87 && rl >= 1 &&
+				 ampReg) ||
+				// experiment: land EVERY 0x87 verbatim (real-puck relay) when enabled
+				(g_landAll87 && m.rid == 0x87);
 			uint8_t p[5 + RELAY_MAXP], plen;
 			if (land01) {
 				p[0] = g_relayOp;
@@ -439,6 +467,18 @@ bool rfConnFlushRelay(uint8_t ch, uint8_t s1)
 				plen = (uint8_t)(4 + rl);
 			}
 			hapLogAdd(0xFE, m.rid, m.data, rl);
+			// Lifecycle log (CDC debug boot): EXACTLY what we TX to the controller, so a capture shows
+			// whether OpenPuck (or Steam in the background) pokes the controller right before a buzz
+			// latches -- the piece the I45 stream (controller->us) can't show. Low rate outside a haptic
+			// burst; guarded so it never blocks the loop. cur = target slot.
+			if (Serial.availableForWrite() > 60) {
+				Serial.printf("# TX t=%lu slot%d %s rid=%02X:",
+					      (unsigned long)millis(), cur,
+					      land01 ? "L01" : "l05", m.rid);
+				for (uint8_t i = 0; i < rl && i < 8; i++)
+					Serial.printf(" %02X", m.data[i]);
+				Serial.println();
+			}
 			// slot was already consumed under the critical section above.
 			// s1 carries a PID distinct from the GET poll (caller cycles it) so the controller's ESB
 			// dedup never treats the GET as a retransmit of this relay. 80us RX: relay is NO-ACK.
@@ -544,20 +584,18 @@ void hapticOnReconnect(int slot)
 }
 void hapticTask()
 {
-	// Lizard-suppression keepalive (OFF by default; 'u' toggles for A/B): land SET_SETTINGS index 9 = 0 on
-	// each connected controller every LIZKEEP_MS, the way Steam does through the real puck (sniff1.json:
-	// id9=0 every 3.000s). Holding settings[9]=0 keeps the controller's revert timer (ibex FUN_0004265c)
-	// from re-enabling autonomous mode + resetting all settings to defaults (the amp-pop / spurious buzz).
-	// BUT settings[9]=0 disables the controller's whole pad-input layer (ibex FUN_0001bd80 early-returns when
-	// id9==0), and the autonomous TOUCHPAD HAPTIC tick is generated by that layer -- so holding id9=0 kills
-	// the pad ticks (confirmed on HW). There is NO id9 setting that keeps ticks while suppressing lizard;
-	// id9 gates the entire pad layer. So NEVER send it while lizard is active -- pure MODE_LIZARD and
-	// Steam-closed both want those ticks; leaving id9 alone (default 1) keeps them for free. In Steam-driven
-	// mode Steam sends its own id9=0 (now landed by the whitelist), so this synthesized copy is redundant
-	// there; off by default, it's the experiment behind 'u'. NOTE the framing: this uses 0x87 (SET_SETTINGS),
-	// which is idempotent -- a repeated same-value id9=0 is change-guarded in the controller and does NOT
-	// re-fire the click-causing 0x81 side effects, so holding via 0x87 is silent where a looped 0x81 was not.
-	if (g_lizKeep && !puckLizardActive()) {
+	// id9=0 hold in MODE_STEAM: land SET_SETTINGS index 9 = 0 on each connected controller every LIZKEEP_MS,
+	// the way the real puck does (sniff1.json: id9=0 landed ~every few s). This holds the controller in
+	// gamepad mode with its AUTONOMOUS mapping/haptic engine OFF -- which is what stops the controller's own
+	// touchpad-haptic engine from latching into the "deep-inside" buzz seen after repeated reconnects (that
+	// buzz is controller-internal: capture-for-haptics.txt showed the controller in autonomous mode, rid=40/
+	// 41, with OpenPuck relaying no haptics at all -- so only holding id9=0 quiets it). Framing note: 0x87
+	// (SET_SETTINGS) is idempotent -- a repeated same-value id9=0 is change-guarded in the controller, so it
+	// does NOT re-fire the click-causing 0x81 side effects; holding via 0x87 is silent where a looped 0x81
+	// was not. It DOES disable the controller's autonomous touchpad ticks (id9 gates the whole pad layer),
+	// which is fine in Steam mode (Steam owns haptics) -- hence scoped to MODE_STEAM ONLY. Pure MODE_LIZARD
+	// deliberately leaves id9 alone so its autonomous ticks keep working (and it's the mode with no buzz).
+	if (g_lizKeep && g_usbMode == MODE_STEAM) {
 		static unsigned long lastKeep[NSLOT] = { 0 };
 		static const uint8_t KA[3] = { 0x09, 0x00, 0x00 };
 		for (int s = 0; s < NSLOT; s++) {
@@ -584,6 +622,12 @@ void hapticTask()
 		if (!up && wasHapticLinkUp[s]) {
 			uint8_t mk = 0;
 			hapLogAdd(0xFD, 0xEE, &mk, 1);
+			// Lifecycle log (CDC debug boot): the 300ms link-up watchdog saw this slot go silent. Pairs
+			// with the CONNECT/RECONNECT lines from rf_link so a session of cycles shows the full
+			// down->up cadence -- how often the link actually drops (churn) vs stays up.
+			if (Serial.availableForWrite() > 50)
+				Serial.printf("# LC t=%lu slot%d link DOWN\n",
+					      (unsigned long)millis(), s);
 		}
 		wasHapticLinkUp[s] = up;
 	}

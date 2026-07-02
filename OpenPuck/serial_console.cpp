@@ -5,6 +5,7 @@
 #include "haptics.h"
 #include "bonds.h"
 #include "config.h"
+#include "puck_hid.h" // g_cmdCapture (feature-command capture toggle)
 #include "fault_diag.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
@@ -33,6 +34,33 @@ void serialConsolePoll()
 				delay(40);
 				faultDiagArmIntentionalReset();
 				NVIC_SystemReset();
+			} else if (!strcmp(line, "AMP")) {
+				// A/B: land Steam's amp/haptic 0x87 config (0x18/0x2E/0x34/0x35) so haptics play as ticks
+				g_landAmp = !g_landAmp;
+				Serial.printf(
+					"# land amp/haptic 0x87 config %s\n",
+					g_landAmp ? "ON" : "off");
+			} else if (!strcmp(line, "S81")) {
+				// A/B: drop Steam's relayed 0x81 CLEAR_DIGITAL_MAPPINGS (the connect amp-clicker)
+				g_drop81 = !g_drop81;
+				Serial.printf(
+					"# drop relayed 0x81 (Steam mode) %s\n",
+					g_drop81 ? "ON" : "off");
+			} else if (!strcmp(line, "FC")) {
+				// feature-command capture: log Steam's USB SET/GET commands to serial + suppress I45
+				g_cmdCapture = !g_cmdCapture;
+				Serial.printf(
+					"# feature-cmd capture %s (I45 %s)\n",
+					g_cmdCapture ? "ON" : "off",
+					g_cmdCapture ? "suppressed" : "on");
+			} else if (!strcmp(line, "L87")) {
+				// EXPERIMENT: land all relayed 0x87 config verbatim (real-puck relay) vs the discard-whitelist.
+				// Exact-match string (single letters are all taken; 'l' alone = rfListenStart).
+				g_landAll87 = !g_landAll87;
+				saveCfg();
+				Serial.printf(
+					"# land-all-0x87 (verbatim 0x87 relay) %s\n",
+					g_landAll87 ? "ON" : "off");
 			} else if (line[0] == 'l')
 				rfListenStart();
 			else if (line[0] == 'B') {
@@ -91,11 +119,11 @@ void serialConsolePoll()
 				NRF_RADIO->TASKS_DISABLE = 1;
 				Serial.println("# RF off");
 			} else if (line[0] == 'u') {
-				// lizard-suppression keepalive A/B toggle (persisted; see haptics.h LIZKEEP_MS)
+				// id9=0 hold (MODE_STEAM only) A/B toggle (persisted; see haptics.h LIZKEEP_MS)
 				g_lizKeep = !g_lizKeep;
 				saveCfg();
 				Serial.printf(
-					"# lizard keepalive (id9=0 / %ums) %s\n",
+					"# id9=0 hold (Steam mode, /%ums) %s\n",
 					(unsigned)LIZKEEP_MS,
 					g_lizKeep ? "ON" : "off");
 			}

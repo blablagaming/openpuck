@@ -47,6 +47,15 @@
 bool relayEnqueue(uint8_t rid, const uint8_t *payload, uint8_t plen,
 		  uint8_t slot = 0xFF);
 
+// Lizard-suppression keepalive: hold the controller's SET_SETTINGS index 9 (digital-mappings/lizard-active)
+// at 0, once per LIZKEEP_MS per connected slot, exactly like the real puck (Steam lands id9=0 every 3.000s,
+// sniff1.json). Without the hold, the controller's revert timer (ibex FUN_0004265c) re-enables autonomous
+// mode and resets ALL settings to defaults -> amp pop + autonomous touchpad ticks = spurious buzz with zero
+// host/RF traffic. 2s cadence = comfortable margin under the (unmeasured, SC1-era ~5s) revert timeout.
+#define LIZKEEP_MS 2000u
+extern uint8_t
+	g_lizKeep; // 1 = keepalive on (default, persisted); console 'u' toggles for A/B
+
 // Post-connect haptic block (persisted, panel-controlled): when g_hapticBlockOn, Steam haptics are dropped for
 // g_hapticBlockMs after a (re)connect so the controller's haptic engine settles before the first real haptic.
 extern uint8_t
@@ -64,8 +73,9 @@ extern volatile uint8_t g_hapticStop;
 // Per-slot block: arm after a (re)connect, drop haptics aimed at the slot for g_hapticBlockMs (when g_hapticBlockOn).
 extern unsigned long g_hapticBlockUntil[NSLOT];
 
-// relay the controller power-off (0x9F "off!"), burst x3 (Steam 0x9F / host-suspend / test button)
-void hapticSendShutdown();
+// relay the controller power-off (0x9F "off!"), burst x3. Steam's per-interface 0x9F passes that slot so
+// only that controller powers off; host-suspend / the panel test button keep the broadcast default (all off).
+void hapticSendShutdown(uint8_t slot = 0xFF);
 
 // ---- diagnostic capture (compiled in only when OPK_LOG): a ring of recent host->controller commands +
 //      link/TX markers, dumped over WebUSB. No-ops in a production build so call sites vanish. ----

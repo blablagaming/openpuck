@@ -87,6 +87,10 @@ extern uint16_t g_relayps;
 // last second's CRC-fail and no-reply counts: diagnose a wedge -- polls>0 + noRx high = RX dead / wrong
 // channel / controller silent; crc high = corrupt replies (interference); polls==0 = poll loop stopped.
 extern uint16_t g_crcps, g_norxps;
+// PER-SLOT per-second snapshots (WebUSB blob v13): the aggregates above are sums of these. Each controller's
+// panel tab shows its OWN link health, so one slot drowning no longer hides behind another's healthy rate.
+extern uint16_t g_slotPollsps[NSLOT], g_slotF1ps[NSLOT], g_slotNewps[NSLOT];
+extern uint8_t g_slotCrcps[NSLOT], g_slotNoRxps[NSLOT], g_slotRelayps[NSLOT];
 // Count of RF-stall self-heals (radio power-cycle + reconnect) performed since boot. Non-zero means the
 // firmware caught and recovered from a full-link wedge that previously needed a manual puck replug.
 extern uint16_t g_rfStallRecover;

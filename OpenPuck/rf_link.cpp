@@ -100,18 +100,29 @@ int g_curSlot = -1;
 // instead of ~400. Each slot's counter increments once per poll-of-that-slot so it cycles 0,1,2,3 cleanly.
 static uint8_t g_pollPid[NSLOT] = {};
 static uint8_t g_relayPid[NSLOT] = {};
-static uint32_t g_stPoll = 0, g_stF1 = 0, g_stF3 = 0;
+// All link statistics are PER SLOT: each controller's polls/replies/errors are counted (and reported --
+// serial stat line, WebUSB blob v13) against that controller only. The old scalar counters merged every
+// slot into one number, so the panel couldn't tell "controller B is drowning" from "everything is slow".
+// The legacy aggregate snapshots (g_pollsps & co) are now sums over slots, kept for the serial line and the
+// blob's pre-v13 fields.
+static uint32_t g_stPoll[NSLOT] = {}, g_stF1[NSLOT] = {};
+static uint32_t g_stF3 = 0;
 // g_stPoll counts true poll CYCLES (one E3 GET per warm slot per cycle). g_stRelay counts relay frames TX'd
 // (host/haptic output reports). They were conflated before (every rfConnTx bumped one counter), which made
 // "Polls/s" read ~540 (250 polls + ~290 relays) and hid that each relay steals a reply window from its poll.
-static uint32_t g_stRelay = 0;
+static uint32_t g_stRelay[NSLOT] = {};
 uint16_t g_relayps = 0;
+// per-slot per-second snapshots (WebUSB blob v13 / per-controller panel stats)
+uint16_t g_slotPollsps[NSLOT] = {}, g_slotF1ps[NSLOT] = {},
+	 g_slotNewps[NSLOT] = {};
+uint8_t g_slotCrcps[NSLOT] = {}, g_slotNoRxps[NSLOT] = {},
+	g_slotRelayps[NSLOT] = {};
 static unsigned long g_stMs = 0;
 // Per-slot dedupe seq + per-slot new-report counter (the real puck sends 0x45 per controller; merging all
 // slots into a single sequence makes one controller "swallow" the other's frame).
 static uint8_t g_lastSeq[NSLOT] = { 0 };
-static uint32_t g_stNew = 0;
-static uint32_t g_stCrc = 0, g_stNoRx = 0;
+static uint32_t g_stNew[NSLOT] = {};
+static uint32_t g_stCrc[NSLOT] = {}, g_stNoRx[NSLOT] = {};
 static uint32_t g_chF1[3] = { 0, 0, 0 };
 // Cycle gate: fires once per g_pollUs; each fire polls every warm slot so all run at ~250 Hz.
 static uint32_t g_lastPollUs = 0;
@@ -273,7 +284,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 		rxlen = rfrx[0];
 		// reply arrived but CRC failed -> RF quality (channel/interference)
 		if (!crcok) {
-			g_stCrc++;
+			g_stCrc[slot]++;
 			g_qosBad++;
 		}
 		// F1 input ~46B; 0x43-augmented ~66B -> allow up to MAXLEN(96)
@@ -313,7 +324,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 							rs;
 			}
 			if (rtype == 0xF1)
-				g_stF1++;
+				g_stF1[slot]++;
 			// controller disconnecting/powering off -> back off 2.5s so we don't immediately re-wake it.
 			// BUT only when no OTHER slot is still live: g_connCooldown is global and gates ALL polling +
 			// beacons, so backing off because ONE controller powered off would drop every other connected
@@ -384,7 +395,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 							 g_lastSeq[g_curSlot]);
 						// genuine new report vs stale poll-repeat
 						if (fresh) {
-							g_stNew++;
+							g_stNew[g_curSlot]++;
 							g_lastSeq[g_curSlot] =
 								rep[1];
 						}
@@ -589,59 +600,6 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 								rep[0], rep + 1,
 								(uint8_t)(tlen -
 									  1));
-					} else if (ttype == 6 && tlen >= 46 &&
-						   (size_t)(idx + 2) + tlen <=
-							   sizeof(rfrx) &&
-						   rfrx[idx + 2] == 0x42) {
-						// NEW-FIRMWARE main input report (SC2 beta update ~2026-07): the controller moved
-						// its gamepad input from report 0x45 (45B body) to 0x42 (53B body). The IMU tail
-						// [34..45] is byte-identical to 0x45; the FRONT section [2..29] (buttons/sticks/
-						// triggers/pads) is a different layout still being reversed. Interim handling:
-						//  (a) forward 0x42 VERBATIM to Steam -- onReport45 reads rep[0] for the id, and
-						//      report 0x42 is already declared in PUCK_HID_DESC (53B), so this is exactly
-						//      what the real puck does -> restores Steam for new-fw controllers;
-						//  (b) decode the (identical) IMU into g_in so gyro-reading stream modes stay right.
-						// TODO(front-section): once the 0x42 [2..29] layout is captured, decode buttons/
-						// sticks/pads into g_in here (and drive the Steam-wake / Steam+Y-shutdown / mode
-						// chord like the 0x45 branch) so emulated modes (Switch/PS/Xbox/lizard) work too.
-						// The proven 0x45 branch above is left untouched so OLD controllers cannot regress.
-						const uint8_t *rep = &rfrx[idx + 2];
-						bool fresh =
-							(rep[1] != g_lastSeq[g_curSlot]);
-						if (fresh) {
-							g_stNew++;
-							g_lastSeq[g_curSlot] = rep[1];
-						}
-						g_connF1++;
-						imuFrom45(rep, &g_in[g_curSlot].ax,
-							  &g_in[g_curSlot].ay,
-							  &g_in[g_curSlot].az,
-							  &g_in[g_curSlot].gx,
-							  &g_in[g_curSlot].gy,
-							  &g_in[g_curSlot].gz);
-						if (g_active)
-							g_active->onReport45(g_curSlot,
-									     rep, fresh,
-									     tlen);
-						// RE capture aid: dump the full 0x42 report so the front-section [2..29] layout
-						// can be reversed by holding one control at a time. ~20/s, non-blocking. Remove
-						// once the layout is pinned.
-						{
-							static unsigned long lastI42 =
-								0;
-							if (Serial.availableForWrite() >
-								    120 &&
-							    millis() - lastI42 >= 50) {
-								lastI42 = millis();
-								Serial.print("I42 ");
-								for (uint8_t i = 0;
-								     i < tlen; i++)
-									Serial.printf(
-										"%02X",
-										rep[i]);
-								Serial.println();
-							}
-						}
 					} else if (ttype == 6 &&
 						   (size_t)(idx + 2) + tlen <=
 							   sizeof(rfrx) &&
@@ -650,16 +608,23 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						// DON'T decode (not 0x45 input, not 0x43/0x44 status). If the new controller
 						// firmware moved input off 0x45, its record shows up here. Log rid + full body,
 						// rate-limited + non-blocking so it can't stall the loop. Remove once pinned.
-						static unsigned long lastUnk = 0;
-						if (Serial.availableForWrite() > 110 &&
+						static unsigned long lastUnk =
+							0;
+						if (Serial.availableForWrite() >
+							    110 &&
 						    millis() - lastUnk >= 200) {
 							lastUnk = millis();
-							Serial.printf("UNK rid=%02X tlen=%u: ",
-								      rfrx[idx + 2], tlen);
-							for (uint8_t i = 0; i < tlen; i++)
+							Serial.printf(
+								"UNK rid=%02X tlen=%u: ",
+								rfrx[idx + 2],
+								tlen);
+							for (uint8_t i = 0;
+							     i < tlen; i++)
 								Serial.printf(
 									"%02X",
-									rfrx[idx + 2 + i]);
+									rfrx[idx +
+									     2 +
+									     i]);
 							Serial.println();
 						}
 					}
@@ -741,7 +706,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 			rxlen = 0;
 		// RX window expired with no packet at all
 	} else {
-		g_stNoRx++;
+		g_stNoRx[slot]++;
 		g_qosBad++;
 	}
 	NRF_RADIO->TASKS_DISABLE = 1;
@@ -833,7 +798,7 @@ static void rfConnStep()
 			uint8_t rs1 =
 				(uint8_t)((((g_relayPid[k]++) & 3) << 1) | 1);
 			if (rfConnFlushRelay(ch, rs1))
-				g_stRelay++;
+				g_stRelay[k]++;
 		}
 		// per-slot PID cycle so each bonded controller's polls stay distinct
 		uint8_t pidv = g_pollPid[k]++;
@@ -853,7 +818,7 @@ static void rfConnStep()
 		}
 		if (rx)
 			g_chF1[0]++;
-		g_stPoll++; // one true poll cycle for this slot
+		g_stPoll[k]++; // one true poll cycle for this slot
 		g_connPoll++;
 	};
 
@@ -870,7 +835,8 @@ static void rfConnStep()
 		if (!g_slot[k].used)
 			continue;
 		bool everReplied = g_connReplyMs[k] != 0;
-		bool cold = everReplied && (nowMs - g_connReplyMs[k] > SLOT_COLD_MS);
+		bool cold = everReplied &&
+			    (nowMs - g_connReplyMs[k] > SLOT_COLD_MS);
 		bool phantom = !everReplied && linkUp;
 		if ((cold || phantom) &&
 		    nowMs - g_slotLastAttemptMs[k] < SLOT_COLD_RETRY_MS)
@@ -989,12 +955,37 @@ void rfLinkTask()
 		}
 	}
 	if (g_connOn && millis() - g_stMs >= 1000) {
-		g_f1ps = g_stF1;
-		g_newps = g_stNew;
-		g_pollsps = (uint16_t)g_stPoll;
-		g_relayps = (uint16_t)g_stRelay;
-		g_crcps = (uint16_t)g_stCrc;
-		g_norxps = (uint16_t)g_stNoRx;
+		// Per-slot snapshots first (blob v13 / per-controller panel stats), then the legacy aggregates as
+		// their sums (serial stat line + pre-v13 blob fields).
+		uint32_t tPoll = 0, tF1 = 0, tNew = 0, tCrc = 0, tNoRx = 0,
+			 tRelay = 0;
+		for (int s = 0; s < NSLOT; s++) {
+			g_slotPollsps[s] = (uint16_t)g_stPoll[s];
+			g_slotF1ps[s] = (uint16_t)g_stF1[s];
+			g_slotNewps[s] = (uint16_t)g_stNew[s];
+			g_slotCrcps[s] =
+				(uint8_t)(g_stCrc[s] > 255 ? 255 : g_stCrc[s]);
+			g_slotNoRxps[s] = (uint8_t)(g_stNoRx[s] > 255 ?
+							    255 :
+							    g_stNoRx[s]);
+			g_slotRelayps[s] = (uint8_t)(g_stRelay[s] > 255 ?
+							     255 :
+							     g_stRelay[s]);
+			tPoll += g_stPoll[s];
+			tF1 += g_stF1[s];
+			tNew += g_stNew[s];
+			tCrc += g_stCrc[s];
+			tNoRx += g_stNoRx[s];
+			tRelay += g_stRelay[s];
+			g_stPoll[s] = g_stF1[s] = g_stNew[s] = 0;
+			g_stCrc[s] = g_stNoRx[s] = g_stRelay[s] = 0;
+		}
+		g_f1ps = (uint16_t)tF1;
+		g_newps = (uint16_t)tNew;
+		g_pollsps = (uint16_t)tPoll;
+		g_relayps = (uint16_t)tRelay;
+		g_crcps = (uint16_t)tCrc;
+		g_norxps = (uint16_t)tNoRx;
 		g_pollPeriodUs =
 			g_pollDtCnt ? (uint16_t)(g_pollDtSum / g_pollDtCnt) : 0;
 		g_pollDtSum = 0;
@@ -1002,18 +993,11 @@ void rfLinkTask()
 		if (Serial.availableForWrite() > 70)
 			Serial.printf(
 				"# stat polls=%lu/s F1=%lu/s new=%lu/s F3=%lu/s(v%d) e7b=%u crcfail=%lu noRx=%lu slot=%d\n",
-				(unsigned long)g_stPoll, (unsigned long)g_stF1,
-				(unsigned long)g_stNew, (unsigned long)g_stF3,
-				(int8_t)g_connF3v, g_e7b,
-				(unsigned long)g_stCrc, (unsigned long)g_stNoRx,
-				g_curSlot);
-		g_stPoll = 0;
-		g_stRelay = 0;
-		g_stF1 = 0;
-		g_stNew = 0;
+				(unsigned long)tPoll, (unsigned long)tF1,
+				(unsigned long)tNew, (unsigned long)g_stF3,
+				(int8_t)g_connF3v, g_e7b, (unsigned long)tCrc,
+				(unsigned long)tNoRx, g_curSlot);
 		g_stF3 = 0;
-		g_stCrc = 0;
-		g_stNoRx = 0;
 		g_chF1[0] = g_chF1[1] = g_chF1[2] = 0;
 		g_stMs = millis();
 	}

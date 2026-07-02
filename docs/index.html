@@ -108,19 +108,22 @@
       <!-- Per-controller tabs: visible only when 2+ controllers are bonded -->
       <div class="slot-tabs" id="slotTabs" style="display:none"></div>
 
-      <!-- Per-slot: RF link / Battery / Signal -->
+      <!-- Per-slot: RF link / Battery / Signal / this controller's own link rates (blob v13) -->
       <div class="statgrid per-slot-grid">
         <div class="stat"><div class="k">RF link</div><div class="v" id="stLink">—</div></div>
         <div class="stat"><div class="k">Battery</div><div class="v" id="stBatt">—</div></div>
         <div class="stat"><div class="k">Signal</div><div class="v" id="stRssi">—</div></div>
+        <div class="stat"><div class="k">Polls/s</div><div class="v" id="stSlotPolls">—</div></div>
+        <div class="stat"><div class="k">Delivered</div><div class="v" id="stSlotF1">—</div></div>
+        <div class="stat"><div class="k">Fails/s (crc·noRx·relay)</div><div class="v" id="stSlotFail">—</div></div>
       </div>
 
-      <!-- Global stats -->
+      <!-- Global stats (sums over ALL controllers; the per-slot grid above shows the selected controller's own rates) -->
       <div class="statgrid">
-        <div class="stat"><div class="k">Delivered</div><div class="v" id="stRate">—</div></div>
-        <div class="stat"><div class="k">New reports</div><div class="v" id="stNew">—</div></div>
-        <div class="stat"><div class="k">Polls/s</div><div class="v" id="stPolls">—</div></div>
-        <div class="stat"><div class="k">Relay/s</div><div class="v" id="stRelay">—</div></div>
+        <div class="stat"><div class="k">Delivered (all)</div><div class="v" id="stRate">—</div></div>
+        <div class="stat"><div class="k">New reports (all)</div><div class="v" id="stNew">—</div></div>
+        <div class="stat"><div class="k">Polls/s (all)</div><div class="v" id="stPolls">—</div></div>
+        <div class="stat"><div class="k">Relay/s (all)</div><div class="v" id="stRelay">—</div></div>
         <div class="stat"><div class="k">RF fails/s (crc·noRx·heal)</div><div class="v" id="stRfFail">—</div></div>
         <div class="stat"><div class="k">Clock LF / HF</div><div class="v" id="stClock">—</div></div>
         <div class="stat"><div class="k">µs per ms (ideal 1000)</div><div class="v" id="stUsPerMs">—</div></div>
@@ -351,10 +354,19 @@ let g_slotData = []; // [{up, battery, rssi}] indexed by slot 0..3, only set for
 
 function updateSlotDisplay(slotIdx) {
   const d = g_slotData[slotIdx];
-  if (!d) { $("#stLink").innerHTML="—"; $("#stBatt").textContent="—"; $("#stRssi").textContent="—"; return; }
+  if (!d) { $("#stLink").innerHTML="—"; $("#stBatt").textContent="—"; $("#stRssi").textContent="—";
+            $("#stSlotPolls").textContent="—"; $("#stSlotF1").textContent="—"; $("#stSlotFail").textContent="—"; return; }
   $("#stLink").innerHTML = d.up ? '<span class="pill up">up</span>' : '<span class="pill dn">down</span>';
   $("#stBatt").textContent = (d.up && d.battery) ? d.battery+"%" : "—";
   $("#stRssi").textContent = (d.up && d.rssi) ? ("-"+d.rssi+" dBm") : "—";
+  // blob v13: this controller's OWN rates (the global grid's numbers are the sum over all controllers)
+  if (d.stats) {
+    $("#stSlotPolls").textContent = d.stats.polls+" /s";
+    $("#stSlotF1").textContent = d.up ? (d.stats.f1+" /s ("+d.stats.newps+" new)") : "—";
+    $("#stSlotFail").textContent = d.stats.crc+" · "+d.stats.norx+" · "+d.stats.relay;
+  } else {
+    $("#stSlotPolls").textContent="—"; $("#stSlotF1").textContent="—"; $("#stSlotFail").textContent="—";
+  }
 }
 
 function renderSlotTabs(bondedCount) {
@@ -527,6 +539,16 @@ function applyBlob(p){
     for (let s=0; s<4; s++) { if (!bondedSet.has(s)) g_slotData[s] = null; }
     // clamp active slot to a valid bonded slot
     if (!g_slotData[g_activeSlot]) g_activeSlot = bondedSlots[0] || 0;
+    // v13: per-slot link stats (fw p[141..176] -> js index 139..174): each controller's own
+    // polls/delivered/new/crc/noRx/relay, so the tabs no longer show every controller merged into one number
+    if (p.length >= 175) {
+      for (let s=0; s<4; s++) {
+        if (!g_slotData[s]) continue;
+        const b = 139 + s*9;
+        g_slotData[s].stats = { polls: p[b]|(p[b+1]<<8), f1: p[b+2]|(p[b+3]<<8),
+                                newps: p[b+4]|(p[b+5]<<8), crc: p[b+6], norx: p[b+7], relay: p[b+8] };
+      }
+    }
     renderSlotTabs(bondedN);
   } else {
     // old firmware: single-slot display

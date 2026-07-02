@@ -51,7 +51,9 @@ __attribute__((naked)) void WDT_IRQHandler(void)
 void faultDiagArmHangCapture()
 {
 	NRF_WDT->INTENSET = WDT_INTENSET_TIMEOUT_Msk;
-	NVIC_SetPriority(WDT_IRQn, 0); // above FreeRTOS configMAX_SYSCALL priority -> fires through BASEPRI guards
+	NVIC_SetPriority(
+		WDT_IRQn,
+		0); // above FreeRTOS configMAX_SYSCALL priority -> fires through BASEPRI guards
 	NVIC_ClearPendingIRQ(WDT_IRQn);
 	NVIC_EnableIRQ(WDT_IRQn);
 }
@@ -191,8 +193,8 @@ void faultDiagBoot()
 		"# reset cause: %s (RESETREAS=0x%08lX gpregret2=0x%02X)\n",
 		REASON_STR[reason], (unsigned long)rr, g2);
 	if (g_hangStage != 0xFF)
-		Serial.printf("# hang stage: %s (%u)\n", faultDiagHangStageStr(),
-			      g_hangStage);
+		Serial.printf("# hang stage: %s (%u)\n",
+			      faultDiagHangStageStr(), g_hangStage);
 	if (g_reportHangPC)
 		Serial.printf("# hang PC=0x%08lX LR=0x%08lX\n",
 			      (unsigned long)g_reportHangPC,
@@ -211,7 +213,8 @@ void clockDiagBoot()
 	uint32_t hf = NRF_CLOCK->HFCLKSTAT;
 	bool lfrun = lf & CLOCK_LFCLKSTAT_STATE_Msk;
 	uint8_t lfsrc = (uint8_t)(lf & CLOCK_LFCLKSTAT_SRC_Msk);
-	g_clkLf = lfrun ? (uint8_t)(lfsrc + 1) : 0; // 1=RC,2=Xtal,3=Synth, 0=stopped
+	g_clkLf = lfrun ? (uint8_t)(lfsrc + 1) :
+			  0; // 1=RC,2=Xtal,3=Synth, 0=stopped
 	bool hfxtal = hf & CLOCK_HFCLKSTAT_SRC_Msk;
 	g_clkHf = hfxtal ? 2 : 0; // 2=crystal, 0=RC
 	Serial.printf("# clock: LFCLK=%s HFCLK=%s\n",
@@ -278,7 +281,8 @@ void faultDiagStackTick()
 		uint16_t hw = (uint16_t)st[i].usStackHighWaterMark;
 		if (!strcmp(st[i].pcTaskName, "usbd") && hw < g_usbdStackMin)
 			g_usbdStackMin = hw;
-		else if (!strcmp(st[i].pcTaskName, "loop") && hw < g_loopStackMin)
+		else if (!strcmp(st[i].pcTaskName, "loop") &&
+			 hw < g_loopStackMin)
 			g_loopStackMin = hw;
 	}
 }

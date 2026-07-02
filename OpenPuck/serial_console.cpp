@@ -90,6 +90,14 @@ void serialConsolePoll()
 				g_rfRespond = false;
 				NRF_RADIO->TASKS_DISABLE = 1;
 				Serial.println("# RF off");
+			} else if (line[0] == 'u') {
+				// lizard-suppression keepalive A/B toggle (persisted; see haptics.h LIZKEEP_MS)
+				g_lizKeep = !g_lizKeep;
+				saveCfg();
+				Serial.printf(
+					"# lizard keepalive (id9=0 / %ums) %s\n",
+					(unsigned)LIZKEEP_MS,
+					g_lizKeep ? "ON" : "off");
 			}
 
 			// switch USB mode: 0=steam 1=xbox 2=hori 3=lizard 4=swpro 5=ps5 6=hidgyro 7=ps5-game/clean 8=ds4-game/clean 9=ps3(dualshock3)

@@ -18,6 +18,12 @@
 // repeats makes Steam's trackpad smoothing stair-step. (WebUSB field 14)
 extern uint8_t g_fwdNewOnly;
 
+// True while we are presenting the desktop keyboard/mouse instead of forwarding the gamepad to Steam
+// (MODE_LIZARD always, or MODE_STEAM once Steam's heartbeat has stopped). Exposed so the haptic layer can
+// tell "lizard is active" without duplicating the heartbeat logic -- the lizard-suppression keepalive must
+// NOT run while lizard is active, or it disables the controller's autonomous touchpad haptic ticks.
+bool puckLizardActive();
+
 class SteamPuckController : public IController {
     public:
 	void begin() override;

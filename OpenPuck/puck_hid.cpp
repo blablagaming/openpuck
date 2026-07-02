@@ -118,6 +118,11 @@ static inline bool lizardActive()
 	       (g_usbMode == MODE_LIZARD ||
 		(g_autoLizard && !steamDrivingGamepad()));
 }
+// Public accessor for the haptic layer (haptics.cpp gates the lizard-suppression keepalive on this).
+bool puckLizardActive()
+{
+	return lizardActive();
+}
 static inline void hostStampAlive()
 {
 	g_steamAliveMs = millis();
@@ -153,7 +158,15 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 		// exact condition under which Steam loops the same haptic command (-> connect/wake buzz loop).
 		bool muted = g_resumeMs &&
 			     millis() - g_resumeMs < POST_RESUME_MUTE_MS;
-		if (rid >= 0x80 && rid <= 0x86 && n >= 1 &&
+		// NEVER relay output report 0x81 (= CLEAR DIGITAL MAPPINGS, ibex FUN_0001f554) to the controller.
+		// It is NOT a haptic despite sitting in the 0x80-0x86 range; it is non-idempotent (each one re-arms a
+		// hardware block -> an audible actuator "deep-inside" click) and OpenPuck does its OWN input
+		// translation, so it never needs the controller's internal mapping engine. Steam sends CLEAR DIGITAL
+		// MAPPINGS as part of its per-controller CONNECT init (this is why the click is seen only in Steam
+		// mode, only with Steam open, and only at connect). sniff1.json was captured mid-session (established
+		// link, no connect handshake), so it never showed the connect init -- absence of 0x81 there is not
+		// evidence Steam never sends it. Dropping the relay is safe (Steam still gets 0x45) and quiets connect.
+		if (rid >= 0x80 && rid <= 0x86 && rid != 0x81 && n >= 1 &&
 		    hapticRelaySlotOk(slot) && !lizardActive() && !muted) {
 			if (!haptic82Blocked(slot)) {
 				relayEnqueue(rid, b,
@@ -200,10 +213,11 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 	if (cmd >= 0x80 && cmd <= 0x89)
 		hostStampAlive();
 	// Controller power-off: Steam's "turn off controller" is feature-0x01 frame 9F 04 6F 66 66 21 ("off!"),
-	// confirmed from a real puck capture. The feature-0x01 relay below forwards it once; hapticSendShutdown()
-	// bursts it for NO-ACK reliability (the single hook the test button + host-suspend also drive).
+	// confirmed from a real puck capture. The feature-0x01 relay below forwards it once; hapticSendShutdown
+	// bursts it for NO-ACK reliability. Slot-targeted: the command arrived on THIS controller's interface,
+	// so only this controller powers off (broadcasting killed all connected controllers at once).
 	if (rid == 1 && cmd == 0x9F)
-		hapticSendShutdown();
+		hapticSendShutdown((uint8_t)slot);
 
 	// report 0x01 = raw passthrough -> queue for RF relay to the controller
 	if (rid == 1 && n >= 2) {
@@ -214,8 +228,10 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 		bool muted = g_resumeMs &&
 			     millis() - g_resumeMs < POST_RESUME_MUTE_MS;
 
-		// never push haptics while presenting lizard (Steam isn't reading 0x45 -> would buzz-loop)
-		bool relayOk = hapticRelaySlotOk(slot) &&
+		// never push haptics while presenting lizard (Steam isn't reading 0x45 -> would buzz-loop); and NEVER
+		// relay 0x81 CLEAR DIGITAL MAPPINGS (same reason as the OUTPUT path above -- non-idempotent actuator
+		// click, unused by OpenPuck's own translation, and the source of the Steam-mode connect clicks).
+		bool relayOk = hapticRelaySlotOk(slot) && cmd != 0x81 &&
 			       !(haptic82 && (lizardActive() || muted));
 		if (relayOk && (!haptic82 || !haptic82Blocked(slot))) {
 			// Relay the DECLARED length (up to the 60B RF frame ceiling), not a truncation: Steam's
@@ -334,9 +350,13 @@ static uint16_t handleGet(int slot, uint8_t rid, hid_report_type_t type,
 	if (type != HID_REPORT_TYPE_FEATURE)
 		return 0;
 
-	// host reading feature data => gamepad consumer active (Steam/SDL)
-	if (g_usbMode == MODE_STEAM)
-		hostStampAlive();
+	// Do NOT treat a feature GET as "Steam is driving." A bare read is weak evidence: on Linux the kernel
+	// hid-steam driver (and any hidapi enumerator) issues GET_FEATURE probes even with Steam's window closed,
+	// which pinned steamDrivingGamepad() true forever and blocked the Steam-closed lizard fallback (keyboard/
+	// mouse dead, and the lizard-off writes those readers pair with the probe also killed the autonomous
+	// touchpad haptics). Steam actually taking over is detected by its OUTPUT/SET WRITES (the 0x87 lizard-off
+	// heartbeat ~every 3s, and 0x82 haptics), which stamp g_steamAliveMs on the handleSet paths. So drop the
+	// GET-based stamp entirely; a read alone no longer suppresses lizard.
 	Slot &S = g_slot[slot];
 	uint16_t n = S.resp_len ? S.resp_len : 63;
 	if (n > reqlen)
@@ -453,15 +473,16 @@ void SteamPuckController::onReport45(int slot, const uint8_t *rep, bool fresh,
 	// whichever the controller actually sent, verbatim, under its own id -- both are declared in PUCK_HID_DESC
 	// and this is exactly what the real puck does. rep[0] is the id byte (rep points at it in the F1 TLV).
 	const uint8_t rid = rep[0];
-	if (lizardActive() && rid == 0x45) {
+	if (lizardActive()) {
 		// Every connected controller drives keyboard+mouse on ITS OWN slot interface; the OS merges the
 		// multiple HID mice/keyboards onto the one desktop. (Was hardcoded to slot 0, which went silent
 		// whenever the live controller bonded to a non-zero slot -- e.g. slot 0 holding a stale/phantom
 		// bond from a cloned backup.) rfLizard keeps its glide/edge state per-slot so they don't clobber.
-		// NOTE: rfLizard decodes 0x45 field offsets; the 0x42 front layout isn't reversed yet, so a
-		// new-firmware controller has no driverless lizard output until that decode lands (Steam still works).
+		// rfLizard reads 0x45 field offsets; report 0x42 is VERIFIED byte-identical over [0..45] (see the
+		// rf_link decode note), so both ids drive lizard -- covers MODE_LIZARD and Steam-mode-with-Steam-
+		// closed on new-firmware controllers.
 		rfLizard(slot, rep, &hid[slot], &hid[slot], 0x40, 0x41);
-	} else if (!lizardActive()) {
+	} else {
 		// body length after the id byte, clamped to the descriptor's declared size for this report id
 		// (0x42 = 53B vendor input, 0x45 = 45B input).
 		uint8_t maxb = (rid == 0x42) ? 53 : 45;
@@ -472,8 +493,9 @@ void SteamPuckController::onReport45(int slot, const uint8_t *rep, bool fresh,
 		// only FRESH reports: the real puck dedupes, so stale repeats make Steam's velocity/smoothing
 		// stair-step. g_fwdNewOnly toggles for A/B.
 		if ((fresh || !g_fwdNewOnly) && hid[slot].ready())
-			usbTxHid(&hid[slot], rid, rep + 1,
-				 blen); // Steam/SDL Triton: input report 0x45 (old) / 0x42 (new fw)
+			usbTxHid(
+				&hid[slot], rid, rep + 1,
+				blen); // Steam/SDL Triton: input report 0x45 (old) / 0x42 (new fw)
 	}
 }
 

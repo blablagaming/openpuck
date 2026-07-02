@@ -86,4 +86,5 @@ void clockDiagBoot(); // read+log the clock sources once at boot
 void clockDiagTick(); // call from loop(); recomputes usPerMs about once a second
 uint8_t clockLfSrc();
 uint8_t clockHfSrc();
-uint16_t clockUsPerMs(); // measured micros() advanced per millis() tick (ideal 1000; 0 until first sample)
+uint16_t
+clockUsPerMs(); // measured micros() advanced per millis() tick (ideal 1000; 0 until first sample)

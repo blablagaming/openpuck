@@ -508,10 +508,11 @@ void XboxController::onReport45(int slot, const uint8_t *rep, bool fresh,
 	(void)bodyTlen;
 	if (slot < 0 || slot >= NSLOT)
 		return;
-	// rfXboxGamepad/rfXboxMouse read report 0x45 field offsets. A new-firmware controller sends its main
-	// input as report 0x42 (different front-section layout, not yet reversed) -- decoding it here as 0x45
-	// would emit garbage sticks/buttons. Skip until the 0x42 front layout lands; IMU-only modes are unaffected.
-	if (rep[0] != 0x45)
+	// rfXboxGamepad/rfXboxMouse read report 0x45 field offsets. The new-firmware report 0x42 is VERIFIED
+	// byte-identical over [0..45] (buttons/triggers/sticks/pads/IMU at the same offsets; it only appends 8
+	// trailing bytes and sets always-on status bits 28/29 that no TB_ mask reads -- see the rf_link decode
+	// note), so both ids decode here. Anything else must not be decoded as gamepad input.
+	if (rep[0] != 0x45 && rep[0] != 0x42)
 		return;
 	rfXboxGamepad((uint8_t)slot, rep);
 	// Shared desktop mouse: slot 0's right-pad only. Other slots' right-pad is still part of the

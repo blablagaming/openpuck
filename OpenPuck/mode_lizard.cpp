@@ -7,8 +7,8 @@
 // Evaluate the binding table for ONE controller's button word, merging its keyboard/mouse-button/
 // consumer outputs into the shared accumulators. Pulled out of rfLizard so every bonded controller can
 // feed the same outputs. doRpadMouse/doLpadScroll are map-level (set if such a binding exists at all).
-static void lizardEvalSlot(uint32_t buttons, uint8_t &outMod, uint8_t outKeys[6],
-			   uint8_t &nKeys, uint8_t &outMBtn,
+static void lizardEvalSlot(uint32_t buttons, uint8_t &outMod,
+			   uint8_t outKeys[6], uint8_t &nKeys, uint8_t &outMBtn,
 			   uint8_t &consumerBits, bool &doRpadMouse,
 			   bool &doLpadScroll)
 {
@@ -100,7 +100,8 @@ void rfLizard(Adafruit_USBD_HID *mdev, Adafruit_USBD_HID *kdev, uint8_t mrid,
 		if (!g_slot[s].used)
 			continue;
 		lizardEvalSlot(lizardButtons(g_in[s]), outMod, outKeys, nKeys,
-			       outMBtn, consumerBits, doRpadMouse, doLpadScroll);
+			       outMBtn, consumerBits, doRpadMouse,
+			       doLpadScroll);
 	}
 
 	// ---- right pad -> mouse motion with glide ----

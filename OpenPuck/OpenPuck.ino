@@ -2,7 +2,7 @@
 //
 // This firmware impersonates the Valve puck over USB, maintains puck-style bond slots, speaks the
 // reverse-engineered RF protocol to the controller, and re-enumerates into Steam, Xbox, Switch, PS5, or DS4
-// personalities. Build with -DCFG_TUD_HID=4 (the Adafruit nRF port defaults to 2).
+// personalities. Build with `make build` (bakes in the required CFG_TUD_HID=4 + CFG_TUD_TASK_QUEUE_SZ=64).
 //
 // This file is just the entry point: setup() builds the USB presentation for the persisted mode and arms the
 // hardware watchdog; loop() pumps each subsystem. Everything substantive lives in the modules below -- see
@@ -29,6 +29,7 @@ using namespace Adafruit_LittleFS_Namespace;
 #include "controllers.h"
 #include "haptics.h"
 #include "rf_link.h"
+#include "puck_hid.h" // puckCmdLogDrain()
 #include "rf_diag.h"
 #include "webusb_config.h"
 #include "lizard_map.h"
@@ -37,17 +38,35 @@ using namespace Adafruit_LittleFS_Namespace;
 #include "status_led.h"
 #include "usb_mount.h"
 #include "identity.h"
+#include "fault_diag.h"
+#include "usb_tx.h"
 #include <stdio.h>
 
 #if CFG_TUD_HID < 4
-#error "build with -DCFG_TUD_HID=4 (extra_flags): up to 4 HID interfaces per mode"
+#error "CFG_TUD_HID must be >= 4 (up to 4 HID interfaces per mode). Build with `make build` (bakes it in), or pass -DCFG_TUD_HID=4 in build.extra_flags."
+#endif
+
+// The TinyUSB device-stack event queue (_usbd_q) defaults to 16 entries. tud_task() runs in the dedicated
+// high-priority "usbd" FreeRTOS task, but this firmware emits HID reports from the LOW-priority loop() task
+// (every mode: 0x45 forwards, per-slot 0x79/0x7B/0x43 status, streamed gamepad reports). A cross-task
+// sendReport whose EasyDMA is momentarily busy takes TinyUSB's usbd_defer_func() path, which does a BLOCKING
+// osal_queue_send (xQueueSendToBack WAIT_FOREVER) onto _usbd_q. Under a comms burst (haptics/trackpad floods,
+// the connect-time re-init storm, 4 slots at once) the 16-deep queue saturates; the loop task then blocks
+// posting to it and stops feeding the ~8 s watchdog -> the MCU resets and the controller "disconnects". A
+// deeper queue absorbs realistic bursts so the loop never blocks. Must be set on the build command (it is a
+// TinyUSB-internal #ifndef default, so a sketch header cannot reach usbd.c) -- enforce it here so a build that
+// omits the flag fails loudly instead of shipping the deadlock.
+#if !defined(CFG_TUD_TASK_QUEUE_SZ) || CFG_TUD_TASK_QUEUE_SZ < 32
+#error "CFG_TUD_TASK_QUEUE_SZ must be >= 32: the default 16-deep usbd event queue deadlocks the loop task under comms load -> watchdog reset. Build with `make build` (bakes in 64), or pass -DCFG_TUD_TASK_QUEUE_SZ=64 in build.extra_flags."
 #endif
 
 // puck composite (4 HID + WebUSB) exceeds the default 256 B config buffer
 static uint8_t g_usbCfgDesc[512];
 
-// Per-mode USB serial suffix (modes 1..8: X=xbox N=hori L=lizard P=swpro S=ps5 G=hidgyro Q=ps5game D=ds4game).
-static const char MODE_SUFFIX[] = { 'X', 'N', 'L', 'P', 'S', 'G', 'Q', 'D' };
+// Per-mode USB serial suffix (modes 1..9: X=xbox N=hori L=lizard P=swpro S=ps5 G=hidgyro Q=ps5game D=ds4game 3=ps3).
+static const char MODE_SUFFIX[] = {
+	'X', 'N', 'L', 'P', 'S', 'G', 'Q', 'D', '3'
+};
 // Fixed-interface flags captured at boot so usbReenumerate (dynamic mount, no reboot) replays them.
 static bool s_dynWantWebusb = false, s_dynWantWakeMouse = false;
 
@@ -65,7 +84,7 @@ void usbReenumerate(uint8_t k)
 	// serial carries the mounted count so the host invalidates its cached config descriptor on a change
 	snprintf(
 		g_usbSerial, sizeof g_usbSerial, "%s%c%u", g_unit,
-		MODE_SUFFIX[(g_usbMode >= 1 && g_usbMode <= 8) ? g_usbMode - 1 :
+		MODE_SUFFIX[(g_usbMode >= 1 && g_usbMode <= 9) ? g_usbMode - 1 :
 								 0],
 		(unsigned)k);
 	USBDevice.setSerialDescriptor(g_usbSerial);
@@ -196,7 +215,10 @@ void setup()
 		if (!puckMode && !psClean)
 			usb_web.begin();
 		// bmAttributes: required(0x80) | remote_wakeup(0x20). Remote Wakeup lets us signal wake-from-sleep.
-		USBDevice.setConfigurationAttribute(0x80 | 0x20);
+		// The PS3/Sixaxis (the only clean-PS mode on this static path) advertises 0x80 only -- match it so a
+		// strict console doesn't see a capability the genuine pad never claims.
+		USBDevice.setConfigurationAttribute(psClean ? 0x80 :
+							      (0x80 | 0x20));
 
 		// re-attach with the final descriptor (host re-reads it fresh -> deterministic enumeration)
 		USBDevice.attach();
@@ -208,17 +230,27 @@ void setup()
 		USBDevice.remoteWakeup();
 		ledWakePulse();
 	} // wake host if bus was sleeping when we (re-)attached
+	// Route all device->host HID sends through the usbd task (SOF drain) so loop() never calls tud_* directly
+	// -> the cross-task blocking-defer that deadlocked the loop under comms load can no longer happen.
+	usbTxBegin();
+	webusbInit(); // also drain the WebUSB status blob from the usbd task (its flush() can block loop() too)
 	hapticInit();
 	static const char *MODE_NAME[] = {
 		"STEAM(puck)",	       "XBOX(xinput+mouse)",
 		"SWITCH(horipad)",     "LIZARD(puck kb/mouse)",
 		"SWITCH(pro+gyro)",    "PS5(dualsense)",
 		"HIDGYRO(ds4+motion)", "PS5(dualsense,game/clean)",
-		"DS4(ds4,game/clean)"
+		"DS4(ds4,game/clean)", "PS3(dualshock3/sixaxis)"
 	};
 	Serial.printf("# copycat up: unit=%s board=%s, mode=%s\n", g_unit,
 		      g_board,
 		      MODE_NAME[g_usbMode <= MODE_MAX ? g_usbMode : 0]);
+	// Classify why we (re)booted: distinguishes a watchdog hang from a HardFault from an intentional reboot
+	// (issue #72 -- those are conflated in the field). Surfaced on the WebUSB panel too.
+	faultDiagBoot();
+	// Clock fingerprint: which crystals/oscillators this (possibly clone) board actually came up on. Surfaced
+	// on the panel so flaky clones can be told apart from the known-good board.
+	clockDiagBoot();
 	if (puckMode)
 		Serial.printf(
 			"# puck USB: %s\n",
@@ -249,6 +281,11 @@ void setup()
 	NRF_WDT->CRV = 8UL * 32768UL - 1; // timeout in 32.768 kHz ticks (~8 s)
 	NRF_WDT->RREN = WDT_RREN_RR0_Msk; // arm reload register 0
 	NRF_WDT->TASKS_START = 1;
+	// Capture the stuck PC on the WDT's pre-reset interrupt (software stand-in for SWD on the clone hangs).
+	faultDiagArmHangCapture();
+	// Flash black box: at ~6s of loop stall (2s before the WDT reset) dump both tasks' stacked PCs + vitals
+	// to a reserved flash page -- the post-mortem channel that survives even the boards that wipe .noinit.
+	faultDiagBlackBoxArm();
 }
 
 // loop-timing diagnostics: poll rate is capped by loop ITERATION time (pacing wants 4000us but the poll only
@@ -265,8 +302,17 @@ void loop()
 {
 	// feed the watchdog; if we ever stop, the ~8s WDT auto-resets us
 	NRF_WDT->RR[0] = WDT_RR_RR_Reload;
+	faultDiagBeat(); // loop heartbeat -- the SOF blob reports ms-since-beat so a wedge is visible live
+	faultDiagStackTick(); // per-task stack headroom (self-gated ~1Hz) -- usbd-overflow hypothesis check
+	faultDiagFlightTick(); // flight recorder: refresh vitals + heartbeat crumb + live CDC vitals line
+	hapticStabTask(); // stability-test keepalive buzz (no-op unless armed via WebUSB)
+	// cross-check HFCLK(micros) vs LFCLK(millis) once a second -- cheap, both builds (clone clock diagnostic)
+	clockDiagTick();
 	if (g_dirty) {
 		g_dirty = false;
+		// A bond flash write erases+programs a page with interrupts effectively stalled for ms -- a known
+		// watchdog-hang class on slow-flash clones, so leave a crumb bracketing it in the recorder.
+		faultDiagTrace(FR_SAVE, 0);
 		saveBonds();
 	}
 #if OPK_LOG
@@ -276,28 +322,39 @@ void loop()
 	static unsigned long secMs = 0;
 	uint32_t t;
 	t = micros();
+	faultDiagSetStage(0);
 	webusbPoll();
 	acc[0] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(1);
 	if (g_active)
 		g_active->task();
 	acc[1] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(2);
 	serialConsolePoll();
 	acc[2] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(3);
 	rfDiagTask();
 	acc[3] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(4);
 	rfLinkTask();
 	acc[4] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(5);
 	hapticTask();
 	acc[5] += (uint32_t)(micros() - t);
 	t = micros();
+	faultDiagSetStage(6);
 	ledTask();
 	acc[6] += (uint32_t)(micros() - t);
+	faultDiagSetStage(7);
 	usbMountTask(); // dynamic mount/unmount of connected controllers (no-op unless enabled)
+	faultDiagSetStage(8);
+	usbTxPump(); // drain queued device->host reports HERE, in loop -- never off-loop (jitters the RF poll)
+	puckCmdLogDrain(); // print captured USB feature commands (diagnostic; no-op unless g_cmdCapture)
 	loops++;
 	if (millis() - secMs >= 1000) {
 		g_loopPeriodUs = loops ? (uint16_t)(1000000UL / loops) : 0;
@@ -316,14 +373,27 @@ void loop()
 		secMs = millis();
 	}
 #else
+	// faultDiagSetStage breadcrumb (GPREGRET2) before each stage: if loop() wedges, the watchdog reset's next
+	// boot reports which stage was stuck. Cheap (one register write each).
+	faultDiagSetStage(0);
 	webusbPoll();
+	faultDiagSetStage(1);
 	if (g_active)
 		g_active->task();
+	faultDiagSetStage(2);
 	serialConsolePoll();
+	faultDiagSetStage(3);
 	rfDiagTask();
+	faultDiagSetStage(4);
 	rfLinkTask();
+	faultDiagSetStage(5);
 	hapticTask();
+	faultDiagSetStage(6);
 	ledTask();
+	faultDiagSetStage(7);
 	usbMountTask(); // dynamic mount/unmount of connected controllers (no-op unless enabled)
+	faultDiagSetStage(8);
+	usbTxPump(); // drain queued device->host reports HERE, in loop -- never off-loop (jitters the RF poll)
+	puckCmdLogDrain(); // print captured USB feature commands (diagnostic; no-op unless g_cmdCapture)
 #endif
 }

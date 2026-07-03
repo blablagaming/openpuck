@@ -20,10 +20,11 @@
 
 // after this much host silence, consider the current 0x82 haptic stream inactive
 #define HAPTIC_QUIET_MS 300u
-// Block ALL haptic relays for this long after a (re)connect: a just-powered-on controller's haptic engine
-// isn't ready, and feeding it haptics in that window leaves it in a degraded/latched state (slow/stuck/missing
-// haptics until a re-init). 3s gives it time to initialize.
-#define HAPTIC_RECONNECT_BLOCK_MS 3000u
+// Post-(re)connect haptic block default. While armed, ALL Steam haptic relays to that slot are dropped: a
+// just-powered-on controller's haptic engine isn't ready, and feeding it haptics in that window leaves it in a
+// degraded/latched state (slow/stuck/missing haptics until a re-init). Runtime-adjustable (g_hapticBlockMs) and
+// toggleable (g_hapticBlockOn) from the WebUSB panel; this is the boot default.
+#define HAPTIC_BLOCK_MS_DEFAULT 10000u
 // 0x82-zero relays per stop event (sent at poll cadence -- not loop rate)
 #define HAPTIC_STOP_BURST 4u
 // max relayed payload bytes per entry: RF frame = [E3][len][05][rid][payload] and MAXLEN=64 -> 60
@@ -46,6 +47,29 @@
 bool relayEnqueue(uint8_t rid, const uint8_t *payload, uint8_t plen,
 		  uint8_t slot = 0xFF);
 
+// id9=0 hold (MODE_STEAM only): land the controller's SET_SETTINGS index 9 (digital-mappings/lizard-active)
+// at 0, once per LIZKEEP_MS per connected slot, like the real puck. This holds the controller's autonomous
+// mapping/haptic engine OFF so it can't latch into the deep-inside buzz seen after repeated reconnects
+// (capture-for-haptics.txt: the buzz is controller-internal; OpenPuck relays no haptics in that state). It
+// also disables the controller's autonomous touchpad ticks (id9 gates the whole pad layer) -- fine in Steam
+// mode (Steam owns haptics), so it is scoped to MODE_STEAM; pure MODE_LIZARD is left alone to keep its ticks.
+#define LIZKEEP_MS 2000u
+extern uint8_t
+	g_lizKeep; // 1 = hold on (default, persisted); console 'u' toggles for A/B
+// Experiment: land ALL relayed 0x87 SET_SETTINGS verbatim (real-puck relay) instead of the discard-whitelist.
+// Default 0 (whitelist). Console "L87" toggles; persisted. See haptics.cpp for the buzz hypothesis it tests.
+extern uint8_t g_landAll87;
+// Land Steam's amp/haptic-config 0x87 (regs 0x18/0x2E/0x34/0x35, not gyro 0x30) so haptics play as clean
+// ticks not a default-amp buzz. On by default; console "AMP" toggles.
+extern uint8_t g_landAmp;
+
+// Post-connect haptic block (persisted, panel-controlled): when g_hapticBlockOn, Steam haptics are dropped for
+// g_hapticBlockMs after a (re)connect so the controller's haptic engine settles before the first real haptic.
+extern uint8_t
+	g_hapticBlockOn; // 1 = block enabled, 0 = relay haptics immediately on connect (default)
+extern uint16_t
+	g_hapticBlockMs; // block duration in ms (default HAPTIC_BLOCK_MS_DEFAULT)
+
 // anything still queued (xinput uses it to pace rumble re-queues)
 bool relayPending();
 extern uint8_t g_relayOp; // relay frame opcode (E3 poll)
@@ -53,11 +77,12 @@ extern uint8_t g_relaySub; // relay sub-TLV type byte = SET
 extern volatile uint8_t g_testHaptic; // 't<n>' injects n test haptics
 // pending haptic-STOP frames to relay (kill a latched whine)
 extern volatile uint8_t g_hapticStop;
-// Per-slot block: arm after a (re)connect, drop haptics aimed at the slot for HAPTIC_RECONNECT_BLOCK_MS.
+// Per-slot block: arm after a (re)connect, drop haptics aimed at the slot for g_hapticBlockMs (when g_hapticBlockOn).
 extern unsigned long g_hapticBlockUntil[NSLOT];
 
-// relay the controller power-off (0x9F "off!"), burst x3 (Steam 0x9F / host-suspend / test button)
-void hapticSendShutdown();
+// relay the controller power-off (0x9F "off!"), burst x3. Steam's per-interface 0x9F passes that slot so
+// only that controller powers off; host-suspend / the panel test button keep the broadcast default (all off).
+void hapticSendShutdown(uint8_t slot = 0xFF);
 
 // ---- diagnostic capture (compiled in only when OPK_LOG): a ring of recent host->controller commands +
 //      link/TX markers, dumped over WebUSB. No-ops in a production build so call sites vanish. ----
@@ -98,8 +123,18 @@ bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq, uint8_t slot = 0);
 // queue + flush the pending host/test/stop relay inside the poll cadence (called from rf_link).
 // rfConnFlushRelay's s1 must carry a PID distinct from the GET poll that follows it (rf_link cycles the shared
 // PID counter), so the controller doesn't dedup the GET as a retransmit of the relay.
+// Stability test: when g_stabTest (WebUSB cmd 0x0F), buzz all controllers every 10s to keep them awake for an
+// unattended uptime-until-hang measurement. hapticStabTask() is called from loop().
+extern bool g_stabTest;
+void hapticStabTask();
+
 void rfConnQueueHapticRelay();
-void rfConnFlushRelay(uint8_t ch, uint8_t s1);
+// returns true if a relay frame was actually transmitted this call (queue had an entry), so the poll loop can
+// count relay TXs separately from poll cycles.
+bool rfConnFlushRelay(uint8_t ch, uint8_t s1);
+// times a relay-ring drain hit its iteration cap (head/tail desync or corruption) -- non-zero means we caught
+// and recovered from what would otherwise be an IRQ-off watchdog hang. Surfaced on the WebUSB panel.
+extern volatile uint16_t g_ringFault;
 
 // boot reset: clear relay/active flags, arm the reconnect block
 void hapticInit();
@@ -112,7 +147,7 @@ void hapticTask();
 // harmless on healthy controllers, so it's worth re-initializing every slot the firmware knows about.
 void hapticReinit(uint8_t slot = 0xFF);
 // Called from rf_link the instant a controller (re)connect is detected (an F-reply after a gap): blocks haptic
-// relays for HAPTIC_RECONNECT_BLOCK_MS and schedules a re-init just after, to keep the freshly-booted
+// relays for g_hapticBlockMs and schedules a re-init just after, to keep the freshly-booted
 // controller out of the degraded/latched haptic state. Reliable -- independent of hapticTask's link heuristic.
 // Per-slot: only the slot that just reconnected is blocked, the others keep relaying.
 void hapticOnReconnect(int slot);

@@ -5,6 +5,11 @@
 // the same puck HID slot. The mapping table g_lizardMap (lizard_map.h) drives all outputs; the
 // default map mirrors the original hardcoded Valve SC1 behavior. Mouse reuses the Xbox-mode
 // velocity+friction+sub-pixel glide model (g_mDiv / g_mFric).
+//
+// EVERY connected controller drives lizard: rfLizard merges g_in[s] across all used bond slots
+// (populated by the per-slot RF decode) onto the ONE shared desktop mouse/keyboard, so any controller
+// on any bond slot contributes and multiple controllers drive the same cursor/keys together. Per-slot
+// glide/edge state keeps one controller's motion from clobbering another's.
 #pragma once
 #include <Adafruit_TinyUSB.h>
 #include <stdint.h>

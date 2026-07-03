@@ -37,14 +37,18 @@
 #define MODE_PS5_GAME 7
 // DS4, CLEAN single-HID (no wake/WebUSB) for game PlayStation classification
 #define MODE_DS4_GAME 8
-#define MODE_MAX 8
+// Sony DualShock 3 / Sixaxis (054C:0268) -- CLEAN single-HID so it enumerates on a REAL PS3 console (the
+// console wants a bare Sixaxis HID, not a composite). Answers the PS3's GET_REPORT(0xF2/0xF5/0xEF/0x01)
+// enable handshake. + gyro/accel + rumble.
+#define MODE_PS3 9
+#define MODE_MAX 9
 
 // The two "game" personalities drop the wake-mouse + WebUSB interfaces so the device is a genuine single-HID PS
 // controller (some PC games -- e.g. Fortnite/UE GameInput -- refuse PS classification when extra interfaces are
 // present). Cost: no config panel / host-wake while in these modes; chord back to Steam (back4 + A) for the panel.
 static inline bool modeIsCleanPS(uint8_t m)
 {
-	return m == MODE_PS5_GAME || m == MODE_DS4_GAME;
+	return m == MODE_PS5_GAME || m == MODE_DS4_GAME || m == MODE_PS3;
 }
 
 static inline bool modeIsPuck(uint8_t m)
@@ -76,6 +80,7 @@ static inline uint8_t etypeForMode(uint8_t m)
 		return ET_SWITCH;
 	case MODE_HIDGYRO:
 	case MODE_DS4_GAME:
+	case MODE_PS3: // DS3 shares the PlayStation face layout / button config
 		return ET_DS4;
 	case MODE_PS5:
 	case MODE_PS5_GAME:
@@ -113,11 +118,15 @@ extern int g_mDiv, g_mFric; // xbox/lizard mouse sensitivity divisor / friction%
 // (0..15 standard, 16=PS Touch Click, 17=PS5 Mute, 18=Switch Capture/Screenshot). qamMap = QAM (3 dots)
 // physical button -> same code space (0 = default/unmapped). abSwap = swap A/B and X/Y (Nintendo layout).
 // padHaptics = 1 keeps the controller's autonomous trackpad haptics, 0 disables them for this type.
+// ledBright = LED brightness sent to the controller on connect: 0 = no override (controller default),
+// 1-100 = brightness %. Steam sets brightness each session; emulated modes never do, so the controller
+// comes up at full brightness. Setting a value here preserves the preferred brightness across mode switches.
 struct TypeCfg {
 	uint8_t back[4];
 	uint8_t qamMap;
 	uint8_t abSwap;
 	uint8_t padHaptics;
+	uint8_t ledBright;
 };
 extern TypeCfg g_type[ET_COUNT];
 extern uint8_t
@@ -130,6 +139,8 @@ extern uint8_t g_back[4];
 extern uint8_t g_qamMap;
 extern uint8_t
 	g_padHaptics; // 1 = trackpad haptics on (default), 0 = disabled for the active type
+// LED brightness for the active emulated type (0 = no override, 1-100 = brightness %)
+extern uint8_t g_ledBright;
 
 // Copy g_type[g_etype] into the live mirrors above (safe defaults when g_etype == ET_NONE).
 void applyActiveType();

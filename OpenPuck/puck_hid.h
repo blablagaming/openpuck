@@ -18,6 +18,22 @@
 // repeats makes Steam's trackpad smoothing stair-step. (WebUSB field 14)
 extern uint8_t g_fwdNewOnly;
 
+// True while we are presenting the desktop keyboard/mouse instead of forwarding the gamepad to Steam
+// (MODE_LIZARD always, or MODE_STEAM once Steam's heartbeat has stopped). Exposed so the haptic layer can
+// tell "lizard is active" without duplicating the heartbeat logic -- the lizard-suppression keepalive must
+// NOT run while lizard is active, or it disables the controller's autonomous touchpad haptic ticks.
+bool puckLizardActive();
+
+// Feature-command capture (diagnostic): when g_cmdCapture is on, Steam's USB feature SET/GET commands are
+// logged to serial (# FC lines) from loop context and the high-rate I45 input stream is suppressed, so the
+// connect handshake is readable. puckCmdLogDrain() must be called once per loop(). Console "FC" toggles it.
+extern bool g_cmdCapture;
+void puckCmdLogDrain(void);
+
+// Drop Steam's relayed 0x81 CLEAR_DIGITAL_MAPPINGS in Steam mode (the amp-clicker in Steam's per-connect
+// config; OpenPuck doesn't need it). On by default; console "S81" toggles for A/B.
+extern bool g_drop81;
+
 class SteamPuckController : public IController {
     public:
 	void begin() override;

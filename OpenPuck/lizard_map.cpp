@@ -7,15 +7,15 @@ using namespace Adafruit_LittleFS_Namespace;
 
 LizardMap g_lizardMap;
 
-#define LZ_FILE    "/lizard_map.bin"
-#define LZ_MAGIC   0xB1u
+#define LZ_FILE "/lizard_map.bin"
+#define LZ_MAGIC 0xB1u
 #define LZ_VERSION 1u
 
 // KB modifier bits (from TinyUSB hid.h)
-#define KM_LCTRL  0x01u
+#define KM_LCTRL 0x01u
 #define KM_LSHIFT 0x02u
-#define KM_LALT   0x04u
-#define KM_LGUI   0x08u
+#define KM_LALT 0x04u
+#define KM_LGUI 0x08u
 
 // Helper: append a binding to g_lizardMap
 static void addBind(uint8_t type, const uint8_t *od7, uint32_t trig,
@@ -46,8 +46,7 @@ static inline void addMouseBtn(uint8_t btn, uint32_t trig, uint32_t hold)
 	uint8_t d[7] = { btn, 0, 0, 0, 0, 0, 0 };
 	addBind(LZ_OUT_MOUSE_BTN, d, trig, hold);
 }
-static inline void addKey(uint8_t mod, uint8_t k0, uint32_t trig,
-			  uint32_t hold)
+static inline void addKey(uint8_t mod, uint8_t k0, uint32_t trig, uint32_t hold)
 {
 	uint8_t d[7] = { mod, k0, 0, 0, 0, 0, 0 };
 	addBind(LZ_OUT_KBD_CHORD, d, trig, hold);

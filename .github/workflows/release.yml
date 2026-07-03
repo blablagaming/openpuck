@@ -4,17 +4,85 @@ on:
   push:
     branches:
       - main
+    tags:
+      - '[0-9]*.[0-9]*.[0-9]*'
+  release:
+    types:
+      - published
 
 permissions:
   contents: write
 
 jobs:
-  build-release:
+  bump-version-tag:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag next patch version
+        run: |
+          set -eu
+          git fetch --force --tags origin
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          if git tag --points-at "$GITHUB_SHA" | grep -Eq "$SEMVER_RE"; then
+            echo "semver tag already exists on this commit; skipping bump"
+            echo "Tag already present on ${GITHUB_SHA}; release build runs from the tag event." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          LAST="$(
+            git tag --list \
+              | grep -E "$SEMVER_RE" \
+              | sort -V \
+              | tail -n1 || true
+          )"
+
+          if [ -z "$LAST" ]; then
+            # Seed semver history at the requested public baseline.
+            NEXT="0.9.1"
+          else
+            MAJOR="${LAST%%.*}"
+            REST="${LAST#*.}"
+            MINOR="${REST%%.*}"
+            PATCH="${LAST##*.}"
+            NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          git tag "$NEXT" "$GITHUB_SHA"
+          git push origin "$NEXT"
+
+  build-release:
+    if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    env:
+      SEMVER_RE: '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate pushed tag is semver
+        if: github.event_name == 'push'
+        run: |
+          echo "${GITHUB_REF_NAME}" | grep -Eq "${SEMVER_RE}"
+
+      - name: Resolve release version
+        id: release_version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -35,6 +103,8 @@ jobs:
           arduino-cli core install adafruit:nrf52
 
       - name: Generate version header
+        env:
+          OPK_BUILD_VERSION: ${{ steps.release_version.outputs.version }}
         run: ./gen_version.sh
 
       - name: Compile OpenPuck
@@ -45,7 +115,7 @@ jobs:
             --clean \
             --build-path build/cache/openpuck \
             --output-dir build/openpuck \
-            --build-property "build.extra_flags=-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=4" \
+            --build-property "build.extra_flags=-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=4 -DCFG_TUD_TASK_QUEUE_SZ=64 -DCFG_TUD_VENDOR_TX_BUFSIZE=256" \
             OpenPuck
 
       - name: Generate UF2 (standard)
@@ -73,19 +143,17 @@ jobs:
             --clean \
             --build-path build/cache/openpuck-recovery \
             --output-dir build/openpuck-recovery \
-            --build-property "build.extra_flags=-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=4 -DOPK_FACTORY_RESET=1" \
+            --build-property "build.extra_flags=-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=4 -DCFG_TUD_TASK_QUEUE_SZ=64 -DCFG_TUD_VENDOR_TX_BUFSIZE=256 -DOPK_FACTORY_RESET=1" \
             OpenPuck
 
       - name: Generate UF2 (recovery)
         run: ./gen_uf2.sh build/openpuck-recovery/OpenPuck.ino.hex build/openpuck-recovery/OpenPuck.ino.uf2
 
       - name: Collect artifacts
+        env:
+          VERSION: ${{ steps.release_version.outputs.version }}
         run: |
           mkdir -p release_assets
-          REF="${GITHUB_REF_NAME}"
-          SAFE_REF="$(printf '%s' "$REF" | tr -c 'A-Za-z0-9._-' '-')"
-          SHA_SHORT="$(git rev-parse --short=8 HEAD)"
-          VERSION="${SAFE_REF}-${SHA_SHORT}"
 
           find build/openpuck build/openpuck-recovery \
             -maxdepth 1 -type f \
@@ -116,16 +184,15 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ format('build-{0}', github.sha) }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ format('Build {0}', github.sha) }}
-          prerelease: true
+          tag_name: ${{ steps.release_version.outputs.version }}
+          name: ${{ format('OpenPuck {0}', steps.release_version.outputs.version) }}
+          prerelease: false
           files: release_assets/*
           body: |
             OpenPuck Firmware Release
 
-            Build: ${{ github.sha }}
-            Ref: ${{ github.ref_name }}
+            Version: ${{ steps.release_version.outputs.version }}
+            Commit: ${{ github.sha }}
 
             ### Files included:
 

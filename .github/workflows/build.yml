@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+  # PRs get the same gate -- without this the checks only ran after merge.
+  pull_request:
 
 jobs:
   compile:

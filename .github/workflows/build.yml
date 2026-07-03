@@ -8,14 +8,21 @@ on:
       - '[0-9]*.[0-9]*.[0-9]*'
   # PRs get the same gate -- without this the checks only ran after merge.
   pull_request:
+  pull_request_review:
+    types:
+      - submitted
 
 jobs:
   compile:
+    if: github.event_name != 'pull_request_review' || github.event.review.state == 'approved'
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -37,7 +44,34 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install adafruit:nrf52
 
+      - name: Resolve build version
+        id: build_version
+        run: |
+          set -eu
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          BASE_VERSION="$(
+            git tag --list \
+              | grep -E "$SEMVER_RE" \
+              | sort -V \
+              | tail -n1 || true
+          )"
+          if [ -z "$BASE_VERSION" ]; then
+            BASE_VERSION="0.9.1"
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            SHORT_SHA="$(git rev-parse --short=8 "${GITHUB_SHA}")"
+            VERSION="${BASE_VERSION}-pr${PR_NUMBER}+${SHORT_SHA}"
+          else
+            VERSION="${BASE_VERSION}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Generate version header
+        env:
+          OPK_BUILD_VERSION: ${{ steps.build_version.outputs.version }}
         run: ./gen_version.sh
 
       - name: Compile OpenPuck

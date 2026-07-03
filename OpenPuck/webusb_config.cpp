@@ -116,8 +116,9 @@ static void webusbSendBlob()
 	p[40] = OPK_GIT_DIRTY ? 1 : 0;
 	memset(&p[41], 0, 12); // 12B ASCII build ID, NUL-padded
 	{
-		const char *buildId = OPK_BUILD_VERSION[0] ? OPK_BUILD_VERSION :
-							     OPK_GIT_HASH;
+		const char *buildId = OPK_BUILD_VERSION;
+		if (!buildId[0])
+			buildId = OPK_GIT_HASH;
 		for (uint8_t i = 0; i < 12 && buildId[i]; i++)
 			p[41 + i] = (uint8_t)buildId[i];
 	}

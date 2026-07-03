@@ -75,6 +75,67 @@ uint8_t faultDiagReason();
 uint32_t faultDiagResetReas();
 const char *faultDiagReasonStr();
 
+// ---- flight recorder (catch a watchdog hang post-mortem) -------------------------------------------------
+// A .noinit ring of recent high-level events + a live vitals snapshot, BOTH surviving a watchdog reset (same
+// mechanism as the hang PC frame: .noinit RAM isn't zeroed by the C runtime, so it rides through the reset even
+// on clone boards whose bootloader wipes GPREGRET2). A hang drops USB the instant it resets, so live CDC
+// logging can never catch the moment itself -- instead we record the trail continuously and DUMP IT ON THE NEXT
+// BOOT when the last reset was a hang. Every push is a few stores under PRIMASK: safe to call from the fragile
+// 800B usbd task and from ISRs (NO printf, NO allocation). This is the "what was going on when it wedged" the
+// cheap boards (Teyleten hangs ~every 4 min) need. `arg` is event-specific, usually packed (high<<8)|low.
+enum {
+	FR_NONE = 0,
+	FR_BEAT, // periodic loop heartbeat (arg = stall ms) -- the gap between beats localizes the wedge in time
+	FR_SET, // usbd handleSet feature write     (arg = (rid<<8)|cmd)
+	FR_GET, // usbd handleGet feature read      (arg = (rid<<8)|cmd)
+	FR_RELAY, // host->controller relay enqueued (arg = (slot<<8)|rid)
+	FR_RFUP, // RF (re)connect                   (arg = slot)
+	FR_RFDN, // RF link down                     (arg = slot)
+	FR_HEAL, // RF-stall radio self-heal (power-cycle)
+	FR_MOUNT, // USB HID mount/unmount changed   (arg = mounted-slot count)
+	FR_SUSP, // USB bus suspend edge
+	FR_RESUME, // USB bus resume edge
+	FR_OFF, // controller power-off (0x9F) relayed (arg = slot)
+	FR_RINGF, // relay-ring fault caught          (arg = running count)
+	FR_SAVE, // bond flash write (saveBonds)
+};
+
+// Push one event into the flight recorder. Cheap + ISR/usbd-safe (a few stores under PRIMASK, no printf).
+void faultDiagTrace(uint8_t evt, uint16_t arg);
+// Per-loop upkeep: refresh the persistent vitals snapshot + emit a heartbeat (~4x/s), and stream the live
+// per-second vitals line over CDC when g_vitals is on. Call once per loop() iteration.
+void faultDiagFlightTick(void);
+// Print the pre-reset flight trail + vitals-at-wedge over CDC (from the boot-time copy of the surviving ring).
+// Called automatically from faultDiagBoot() after a hang; also re-dumpable on demand from the console ("FR").
+void faultDiagDumpFlight(void);
+
+// ---- WebUSB panel access to the saved (pre-reset) trail ---------------------------------------------------
+// The same boot-time copy the console "FR" dumps, exposed for the panel to stream as 0xA8 frames. Mirrors the
+// hapLog capture drain: reset the cursor to the oldest saved event, then pull entries until exhausted, so a
+// full 96-event trail streams across several panel polls without a single blocking write.
+bool faultDiagHaveFlight(
+	void); // true if a pre-reset trail was captured at this boot
+uint16_t faultDiagFlightCount(void); // saved events available to stream (<= 96)
+uint16_t faultDiagFlightTotal(
+	void); // total events pushed before the reset (for "showing N of M")
+void faultDiagFlightDrainReset(
+	void); // rewind the pull cursor to the oldest saved event
+// Pull the next saved event; false when exhausted. *dtMs = ms the event fired BEFORE the last recorded crumb.
+bool faultDiagFlightPull(uint32_t *dtMs, uint8_t *evt, uint8_t *stage,
+			 uint16_t *arg);
+// Vitals as of the last ~4Hz refresh before the reset (the "@wedge" snapshot). false if no trail was captured.
+struct FaultFlightVitals {
+	uint16_t loopPerSec;
+	uint16_t usbdStkFree, loopStkFree;
+	uint32_t heapUsed;
+	uint16_t pollsps, relayps, crcps, norxps, rfHeal, ringFault;
+	uint8_t curStage, stallMs;
+};
+bool faultDiagFlightVitals(struct FaultFlightVitals *out);
+// 1 = stream the live per-second vitals line over CDC (console "VIT" toggles). Watch usbd stack / heap / relay
+// rate trend on a flaky board in the seconds before it wedges.
+extern bool g_vitals;
+
 // ---- clock fingerprint (clone-board stability diagnostic) -------------------------------------------------
 // nice!nano clones vary in their crystals. The bare-metal radio needs HFXO (32 MHz xtal); millis()/RTC and the
 // watchdog run on LFCLK (32.768 kHz xtal or RC). If a clone runs HFCLK on the internal RC, or its LFCLK is

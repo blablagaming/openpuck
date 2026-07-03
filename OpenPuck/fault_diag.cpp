@@ -3,6 +3,8 @@
 #include <FreeRTOS.h>
 #include <task.h> // uxTaskGetSystemState -> per-task stack high-water (overflow hypothesis check)
 #include <string.h>
+#include "rf_link.h" // g_pollsps/g_relayps/g_crcps/g_norxps/g_rfStallRecover -- flight-recorder vitals
+#include "haptics.h" // g_ringFault, relayPending() -- relay-load vitals
 
 // GPREGRET2 markers. GPREGRET (id 0) is reserved by the Adafruit bootloader for the DFU magic; GPREGRET2 is
 // free for the application and is retained across soft/watchdog/pin reset, cleared only on power-on/brownout.
@@ -139,6 +141,50 @@ const char *faultDiagHangStageStr()
 	return g_hangStage < STAGE_COUNT ? STAGE_STR[g_hangStage] : "n/a";
 }
 
+// ---- flight recorder (data) --------------------------------------------------------------------------------
+// The live ring lives in .noinit so it survives a watchdog reset (like g_hangFrame). At boot we copy the
+// pre-reset trail into g_flightSaved (ordinary RAM -- no need to survive twice) so the live session can start a
+// fresh ring while the console can still re-dump the old trail on demand. Declared here (above faultDiagBoot)
+// because the boot classifier snapshots + dumps it; the push/tick/dump functions are implemented further down.
+struct FRRec {
+	uint32_t ms; // millis() at the push
+	uint16_t arg; // event-specific
+	uint8_t evt; // FR_*
+	uint8_t stage; // loop stage current at the push (g_curStage)
+};
+#define FR_RING 96u
+#define FR_MAGIC 0x464C4954u // "FLIT"
+struct FlightRec {
+	uint32_t magic;
+	uint16_t head; // next write slot
+	uint16_t count; // total pushed this session (saturating) -> "showing last N of M"
+	FRRec ring[FR_RING];
+	// live vitals, refreshed ~4x/s -- the last values captured before a wedge
+	uint32_t vMs; // millis() at last refresh
+	uint32_t loopPerSec; // loop() iterations in the last full second
+	uint32_t heapUsed; // mallinfo().uordblks (bytes) -- trend up = leak/fragmentation
+	uint16_t usbdStackFree, loopStackFree; // words (0 = overflowed)
+	uint16_t pollsps, relayps, crcps, norxps;
+	uint16_t rfHeal, ringFault;
+	uint8_t curStage;
+	uint8_t stallMs; // ms since last loop beat, capped 255
+};
+__attribute__((section(".noinit"))) static volatile struct FlightRec g_flight;
+static struct FlightRec
+	g_flightSaved; // boot-time copy of the pre-reset trail (BSS)
+static bool g_haveSaved = false;
+bool g_vitals = true; // live per-second CDC vitals line (console "VIT" toggles)
+
+static const char *const FR_STR[] = { "none",  "beat",	  "SET",    "GET",
+				      "relay", "rf-up",	  "rf-DN",  "HEAL!",
+				      "mount", "SUSPEND", "resume", "OFF",
+				      "RINGF", "save" };
+#define FR_STR_COUNT ((uint8_t)(sizeof FR_STR / sizeof FR_STR[0]))
+static const char *frEvtStr(uint8_t e)
+{
+	return e < FR_STR_COUNT ? FR_STR[e] : "?";
+}
+
 void faultDiagBoot()
 {
 	uint32_t rr =
@@ -199,6 +245,227 @@ void faultDiagBoot()
 		Serial.printf("# hang PC=0x%08lX LR=0x%08lX\n",
 			      (unsigned long)g_reportHangPC,
 			      (unsigned long)g_reportHangLR);
+
+	// Flight recorder: if the pre-reset trail survived (.noinit), snapshot it into ordinary RAM so the live
+	// session can start a fresh ring while the console can still re-dump the old trail ("FR"). On a hang, dump
+	// it now -- this is the post-mortem of what the firmware was doing in the seconds before it wedged.
+	if (g_flight.magic == FR_MAGIC) {
+		memcpy(&g_flightSaved, (const void *)&g_flight,
+		       sizeof g_flightSaved);
+		g_haveSaved = true;
+	}
+	g_flight.magic = FR_MAGIC; // start this session's trail fresh
+	g_flight.head = 0;
+	g_flight.count = 0;
+	if (isHang)
+		faultDiagDumpFlight();
+}
+
+// ---- flight recorder (implementation; data declared above faultDiagBoot) ----------------------------------
+void faultDiagTrace(uint8_t evt, uint16_t arg)
+{
+	uint32_t pm = __get_PRIMASK();
+	__disable_irq();
+	if (g_flight.magic !=
+	    FR_MAGIC) { // lazy (re)init: power-on garbage or first push this session
+		g_flight.magic = FR_MAGIC;
+		g_flight.head = 0;
+		g_flight.count = 0;
+	}
+	uint16_t h = g_flight.head;
+	g_flight.ring[h].ms = millis();
+	g_flight.ring[h].arg = arg;
+	g_flight.ring[h].evt = evt;
+	g_flight.ring[h].stage = g_curStage;
+	g_flight.head = (uint16_t)((h + 1u) % FR_RING);
+	if (g_flight.count < 0xFFFFu)
+		g_flight.count++;
+	if (!pm)
+		__enable_irq();
+}
+
+void faultDiagFlightTick(void)
+{
+	static unsigned long beatMs = 0, secMs = 0;
+	static uint32_t loops = 0;
+	loops++;
+	unsigned long now = millis();
+
+	// ~4x/s: refresh the persistent vitals snapshot + drop a heartbeat crumb (its cadence in the trail shows
+	// exactly when loop() stopped advancing).
+	if ((uint32_t)(now - beatMs) >= 250u) {
+		beatMs = now;
+		uint32_t stall = faultDiagStallMs();
+		g_flight.vMs = now;
+		g_flight.usbdStackFree = faultDiagUsbdStackFree();
+		g_flight.loopStackFree = faultDiagLoopStackFree();
+		// NOTE: mallinfo() removed here -- it suspended the FreeRTOS scheduler + walked the heap free list 4x/s,
+		// which is new loop latency and a new wedge surface on a slow clone, for zero payoff (heap was flat). If
+		// a heap-usage trend is ever needed, sample it lazily from loop, not on this hot path.
+		g_flight.heapUsed = 0;
+		g_flight.pollsps = g_pollsps;
+		g_flight.relayps = g_relayps;
+		g_flight.crcps = g_crcps;
+		g_flight.norxps = g_norxps;
+		g_flight.rfHeal = g_rfStallRecover;
+		g_flight.ringFault = g_ringFault;
+		g_flight.curStage = g_curStage;
+		g_flight.stallMs = (uint8_t)(stall > 255 ? 255 : stall);
+		faultDiagTrace(FR_BEAT, (uint16_t)g_flight.stallMs);
+	}
+
+	// once per second: latch loop rate + emit the live CDC vitals line (loop context -> Serial is safe here,
+	// unlike the usbd task). Reads as a trend on a flaky board: usbd stack falling toward 0 = the overflow;
+	// heapUsed climbing = a leak; poll==0 = the RF loop stalled; relay high = Steam flooding the link.
+	if ((uint32_t)(now - secMs) >= 1000u) {
+		g_flight.loopPerSec = loops;
+		loops = 0;
+		secMs = now;
+		// Guard on FIFO space: a CDC write to a host that has the port open but isn't draining blocks the loop --
+		// itself a watchdog-hang source (same failure the WebUSB blob send hit). If there's no room this second,
+		// skip the line rather than stall; the persistent trail still captured the vitals via the beat above.
+		if (g_vitals && Serial && Serial.availableForWrite() >= 200) {
+			// Clock fingerprint on every line: the radio waits time out on micros() (HFCLK-derived). If a clone's
+			// HFCLK drops to the internal RC (or micros() freezes), usPerMs drifts off 1000 and a "bounded" RX/
+			// disable wait can spin forever -- the prime suspect for a healthy-then-sudden hard lock. lf/hf: R=RC,
+			// X=xtal, S=synth, -=stopped.
+			const char clkc[] = { '-', 'R', 'X', 'S' };
+			uint8_t lf = clockLfSrc(), hf = clockHfSrc();
+			Serial.printf(
+				"# vit up=%lus loop=%lu/s stall=%ums stage=%s usbdStk=%u loopStk=%u heapUsed=%lu "
+				"poll=%u relay=%u crc=%u norx=%u heal=%u ringF=%u clk=%c/%c usPerMs=%u\n",
+				(unsigned long)(now / 1000),
+				(unsigned long)g_flight.loopPerSec,
+				(unsigned)g_flight.stallMs,
+				faultDiagStageStr(g_flight.curStage),
+				(unsigned)g_flight.usbdStackFree,
+				(unsigned)g_flight.loopStackFree,
+				(unsigned long)g_flight.heapUsed,
+				(unsigned)g_flight.pollsps,
+				(unsigned)g_flight.relayps,
+				(unsigned)g_flight.crcps,
+				(unsigned)g_flight.norxps,
+				(unsigned)g_flight.rfHeal,
+				(unsigned)g_flight.ringFault,
+				lf < 4 ? clkc[lf] : '?',
+				hf < 4 ? clkc[hf] : '?',
+				(unsigned)clockUsPerMs());
+		}
+	}
+}
+
+// Wait (bounded) for room in the CDC TX FIFO so a multi-line dump to a slow host neither drops lines nor
+// blocks forever. Caps each line's wait at ~20ms -> the whole ~100-line dump can't approach the ~8s watchdog.
+static void frWaitTx(uint16_t need)
+{
+	for (uint8_t w = 0;
+	     w < 20 && Serial && Serial.availableForWrite() < need; w++)
+		delay(1);
+}
+
+void faultDiagDumpFlight(void)
+{
+	if (!Serial) // no host attached (e.g. the automatic boot dump before the panel connects) -- use "FR" later
+		return;
+	if (!g_haveSaved || g_flightSaved.magic != FR_MAGIC) {
+		Serial.println(
+			"# flight: no pre-reset trail (recorder lost across this reset, or last boot wasn't a hang)");
+		return;
+	}
+	const struct FlightRec *f = &g_flightSaved;
+	Serial.printf(
+		"# ---- FLIGHT RECORDER (trail up to the last hang) ----\n"
+		"# vitals@wedge: loop=%lu/s stall=%ums stage=%s usbdStkFree=%u loopStkFree=%u heapUsed=%lu\n"
+		"#               poll=%u relay=%u crc=%u norx=%u heal=%u ringFault=%u  (age %lums before reset)\n",
+		(unsigned long)f->loopPerSec, (unsigned)f->stallMs,
+		faultDiagStageStr(f->curStage), (unsigned)f->usbdStackFree,
+		(unsigned)f->loopStackFree, (unsigned long)f->heapUsed,
+		(unsigned)f->pollsps, (unsigned)f->relayps, (unsigned)f->crcps,
+		(unsigned)f->norxps, (unsigned)f->rfHeal,
+		(unsigned)f->ringFault, (unsigned long)0);
+
+	uint16_t total = f->count;
+	uint16_t cnt = total < FR_RING ? total : (uint16_t)FR_RING;
+	if (!cnt) {
+		Serial.println("# flight: trail empty");
+		return;
+	}
+	uint16_t start = (uint16_t)((f->head + FR_RING - cnt) % FR_RING);
+	uint16_t lastIdx = (uint16_t)((f->head + FR_RING - 1u) % FR_RING);
+	uint32_t last = f->ring[lastIdx].ms;
+	Serial.printf(
+		"# %u events (of %u total); t = ms BEFORE the last recorded crumb:\n",
+		cnt, total);
+	for (uint16_t i = 0; i < cnt; i++) {
+		uint16_t idx = (uint16_t)((start + i) % FR_RING);
+		const FRRec *r = &f->ring[idx];
+		frWaitTx(64);
+		Serial.printf("#  -%6lu  %-8s stage=%-9s arg=0x%04X\n",
+			      (unsigned long)(last - r->ms), frEvtStr(r->evt),
+			      faultDiagStageStr(r->stage), r->arg);
+	}
+	Serial.println("# ---- end flight recorder ----");
+}
+
+// ---- WebUSB panel access to the saved trail ----------------------------------------------------------------
+static uint16_t g_frDrain =
+	0; // pull cursor into g_flightSaved, 0 = oldest saved event
+
+bool faultDiagHaveFlight(void)
+{
+	return g_haveSaved && g_flightSaved.magic == FR_MAGIC;
+}
+uint16_t faultDiagFlightCount(void)
+{
+	if (!faultDiagHaveFlight())
+		return 0;
+	uint16_t t = g_flightSaved.count;
+	return t < FR_RING ? t : (uint16_t)FR_RING;
+}
+uint16_t faultDiagFlightTotal(void)
+{
+	return faultDiagHaveFlight() ? g_flightSaved.count : 0;
+}
+void faultDiagFlightDrainReset(void)
+{
+	g_frDrain = 0;
+}
+bool faultDiagFlightPull(uint32_t *dtMs, uint8_t *evt, uint8_t *stage,
+			 uint16_t *arg)
+{
+	uint16_t cnt = faultDiagFlightCount();
+	if (g_frDrain >= cnt)
+		return false;
+	const struct FlightRec *f = &g_flightSaved;
+	uint16_t start = (uint16_t)((f->head + FR_RING - cnt) % FR_RING);
+	uint16_t idx = (uint16_t)((start + g_frDrain) % FR_RING);
+	uint16_t lastIdx = (uint16_t)((f->head + FR_RING - 1u) % FR_RING);
+	*dtMs = (uint32_t)(f->ring[lastIdx].ms - f->ring[idx].ms);
+	*evt = f->ring[idx].evt;
+	*stage = f->ring[idx].stage;
+	*arg = f->ring[idx].arg;
+	g_frDrain++;
+	return true;
+}
+bool faultDiagFlightVitals(struct FaultFlightVitals *out)
+{
+	if (!faultDiagHaveFlight())
+		return false;
+	const struct FlightRec *f = &g_flightSaved;
+	out->loopPerSec =
+		(uint16_t)(f->loopPerSec > 0xFFFFu ? 0xFFFFu : f->loopPerSec);
+	out->usbdStkFree = f->usbdStackFree;
+	out->loopStkFree = f->loopStackFree;
+	out->heapUsed = f->heapUsed;
+	out->pollsps = f->pollsps;
+	out->relayps = f->relayps;
+	out->crcps = f->crcps;
+	out->norxps = f->norxps;
+	out->rfHeal = f->rfHeal;
+	out->ringFault = f->ringFault;
+	out->curStage = f->curStage;
+	out->stallMs = f->stallMs;
+	return true;
 }
 
 // ---- clock fingerprint -------------------------------------------------------------------------------------

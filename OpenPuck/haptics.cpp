@@ -4,6 +4,7 @@
 #include "rf_link.h"
 #include "puck_hid.h" // puckLizardActive() -- gate the lizard-suppression keepalive
 
+#include "fault_diag.h" // faultDiagTrace() -- flight recorder
 // USBDevice.suspended() -> autonomous controller power-off on host sleep
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
@@ -51,6 +52,7 @@ void hapticSendShutdown(uint8_t slot)
 	// controller (broadcasting it killed every connected controller when the user turned off one). The
 	// broadcast default (0xFF) remains for the triggers that logically mean "all off": host suspend and
 	// the panel/test power-off button.
+	faultDiagTrace(FR_OFF, slot);
 	for (uint8_t i = 0; i < HAPTIC_SHUTDOWN_SHOTS; i++)
 		relayEnqueue(0x9F, OFF, sizeof OFF, slot);
 }
@@ -125,6 +127,7 @@ bool relayEnqueue(uint8_t rid, const uint8_t *payload, uint8_t plen,
 	if (rid == 0x82 || rid == 0x80)
 		g_haptic82Ms = millis();
 	__set_PRIMASK(pm);
+	faultDiagTrace(FR_RELAY, (uint16_t)((slot << 8) | rid));
 	return true;
 }
 
@@ -259,6 +262,7 @@ static void hapticCancelPendingOn(int slot)
 			if (!guard--) { // desynced/corrupt ring -> recover, don't spin IRQs-off
 				g_rqHead[s] = g_rqTail[s] = 0;
 				g_ringFault++;
+				faultDiagTrace(FR_RINGF, g_ringFault);
 				break;
 			}
 			RelayMsg &m = g_rq[s][i];
@@ -399,6 +403,7 @@ bool rfConnFlushRelay(uint8_t ch, uint8_t s1)
 		if (!guard--) { // desynced/corrupt ring -> recover, don't spin IRQs-off (watchdog-hang class)
 			g_rqHead[cur] = g_rqTail[cur] = 0;
 			g_ringFault++;
+			faultDiagTrace(FR_RINGF, g_ringFault);
 			break;
 		}
 		RelayMsg &m = g_rq[cur][g_rqTail[cur]];
@@ -647,9 +652,13 @@ void hapticTask()
 	if (susp && !wasSusp) {
 		suspSinceMs = millis();
 		suspArmed = true;
+		faultDiagTrace(FR_SUSP, 0);
 	}
-	if (!susp)
+	if (!susp) {
+		if (wasSusp)
+			faultDiagTrace(FR_RESUME, 0);
 		suspArmed = false;
+	}
 	if (suspArmed && vbus && (millis() - suspSinceMs) >= SUSPEND_OFF_MS) {
 		hapticSendShutdown();
 		suspArmed = false; // fire once per suspend

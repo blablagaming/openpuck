@@ -61,6 +61,15 @@ void serialConsolePoll()
 				Serial.printf(
 					"# land-all-0x87 (verbatim 0x87 relay) %s\n",
 					g_landAll87 ? "ON" : "off");
+			} else if (!strcmp(line, "FR")) {
+				// re-dump the flight recorder trail captured before the last watchdog hang (also printed
+				// automatically at boot, but CDC may not be attached yet then -- this reprints on demand).
+				faultDiagDumpFlight();
+			} else if (!strcmp(line, "VIT")) {
+				// toggle the live per-second CDC vitals line (loop rate / usbd stack / heap / relay trend)
+				g_vitals = !g_vitals;
+				Serial.printf("# live vitals line %s\n",
+					      g_vitals ? "ON" : "off");
 			} else if (line[0] == 'l')
 				rfListenStart();
 			else if (line[0] == 'B') {

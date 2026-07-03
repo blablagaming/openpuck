@@ -1,5 +1,6 @@
 #include "usb_mount.h"
 #include "bonds.h"
+#include "fault_diag.h" // faultDiagTrace() -- flight recorder
 #include <Arduino.h>
 
 uint8_t g_usbMountCount = 0;
@@ -147,5 +148,6 @@ void usbMountTask()
 	if (maskOfList(tmp, n) == mountedMask())
 		return; // same set already mounted (order is preserved across joins/leaves)
 	commitOrder(tmp, n);
+	faultDiagTrace(FR_MOUNT, g_usbMountCount);
 	usbReenumerate(g_usbMountCount);
 }

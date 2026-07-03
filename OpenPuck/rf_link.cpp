@@ -214,8 +214,8 @@ static void rfHostFrameOnce(int slot, bool discovery)
 		g_rfRxCount++;
 		bool crcok = NRF_RADIO->CRCSTATUS & 1;
 		uint8_t len = rfrx[0];
-		// non-blocking: don't stall the loop on CDC backpressure
-		if (Serial.availableForWrite() > 90) {
+		// non-blocking: don't stall the loop on CDC backpressure (whole line ~165B; CDC write() has no timeout)
+		if (Serial.availableForWrite() > 180) {
 			Serial.printf(
 				"*** RESP#%lu ch%u crc%d rxmatch%lu len%u: ",
 				(unsigned long)g_rfRxCount, g_rfCh, crcok,
@@ -318,7 +318,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 					// Lifecycle log (CDC debug boot): distinguish a first-ever connect from a reconnect and
 					// print the silent gap -- lets a long session of connect/disconnect cycles be diffed to
 					// see whether each cycle re-establishes (churn / boot-haptic click) vs stays linked.
-					if (Serial.availableForWrite() > 50) {
+					if (Serial.availableForWrite() > 130) {
 						uint32_t gap =
 							g_connReplyMs[s] ?
 								(uint32_t)(millis() -
@@ -338,6 +338,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 									g_connCooldown));
 					}
 					hapticOnReconnect(s);
+					faultDiagTrace(FR_RFUP, s);
 				}
 				g_connRx++;
 				// link alive -> loop() suppresses the redundant E1 beacon
@@ -368,12 +369,15 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 					if (i != g_curSlot && g_slot[i].used &&
 					    millis() - g_connReplyMs[i] < 300)
 						others++;
+				faultDiagTrace(FR_RFDN,
+					       (uint16_t)((g_curSlot << 8) |
+							  (others & 0xFF)));
 				if (others == 0)
 					g_connCooldown = millis();
 				// Lifecycle log: the controller sent F2 (disconnect/power-off). Note whether it armed the
 				// 2.5s cooldown (which pauses ALL beacon+poll -> the controller can lose the session and
 				// reboot on the next reconnect = a boot-haptic click). Prime suspect for the connect buzz.
-				if (Serial.availableForWrite() > 50)
+				if (Serial.availableForWrite() > 130)
 					Serial.printf(
 						"# LC t=%lu slot%d F2 DISCONNECT others=%d%s\n",
 						(unsigned long)millis(),
@@ -654,7 +658,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 						static unsigned long lastUnk =
 							0;
 						if (Serial.availableForWrite() >
-							    110 &&
+							    150 &&
 						    millis() - lastUnk >= 200) {
 							lastUnk = millis();
 							Serial.printf(
@@ -722,7 +726,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 				// Serial.print stalls the RF+USB loop -> jaggy input). One line/frame using the last record.
 				if (lastRep && !g_connVerbose &&
 				    !g_cmdCapture &&
-				    Serial.availableForWrite() > 110 &&
+				    Serial.availableForWrite() > 150 &&
 				    millis() - g_lastStream >= 4) {
 					g_lastStream = millis();
 					Serial.print("I45 ");
@@ -732,7 +736,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 					Serial.println();
 				}
 			}
-			if (g_connVerbose) {
+			if (g_connVerbose && Serial.availableForWrite() > 180) {
 				Serial.printf(
 					"%s CRX#%lu txtype%02X ch%u len%u: ",
 					isF1 ? "<<<F1" :
@@ -963,6 +967,7 @@ void rfLinkTask()
 		    (uint32_t)(nowMs2 - lastRecoverMs) > interval) {
 			lastRecoverMs = nowMs2;
 			g_rfStallRecover++;
+			faultDiagTrace(FR_HEAL, g_rfStallRecover);
 			if (consecStall < 255)
 				consecStall++;
 			NRF_RADIO->POWER = 0;
@@ -970,7 +975,7 @@ void rfLinkTask()
 			g_connCooldown = 0;
 			g_connSt = 0;
 			g_connStep = 0;
-			if (Serial.availableForWrite() > 60)
+			if (Serial.availableForWrite() > 110)
 				Serial.printf(
 					"# RF STALL (#%u consec=%u%s) -> radio power-cycle + reconnect\n",
 					g_rfStallRecover, consecStall,
@@ -1048,7 +1053,11 @@ void rfLinkTask()
 			g_pollDtCnt ? (uint16_t)(g_pollDtSum / g_pollDtCnt) : 0;
 		g_pollDtSum = 0;
 		g_pollDtCnt = 0;
-		if (Serial.availableForWrite() > 70)
+		// Require room for the WHOLE line (~85B): CDC write() has NO timeout -- it spins yield() until the host
+		// drains, so a guard smaller than the line lets write() start, fill the FIFO mid-line, then spin loop()
+		// forever if the serial host stalls -> watchdog hang. (This exact line, guarded at >70 for an ~85B line,
+		// was the confirmed diagnostic-induced hang: the capture ended truncated mid-"# stat".)
+		if (Serial.availableForWrite() > 130)
 			Serial.printf(
 				"# stat polls=%lu/s F1=%lu/s new=%lu/s F3=%lu/s(v%d) e7b=%u crcfail=%lu noRx=%lu slot=%d\n",
 				(unsigned long)tPoll, (unsigned long)tF1,

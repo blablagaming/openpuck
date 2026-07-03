@@ -269,6 +269,100 @@ static void webusbSendBondExport()
 	}
 }
 
+// Stream the saved (pre-reset) flight-recorder trail to the panel as 0xA8 frames. Always compiled -- the
+// recorder is not OPK_LOG-gated (field hangs happen on release builds too). Frame layout mirrors the 0xA6
+// capture drain so the same drop-on-full discipline applies (a write only issues when the FIFO can take the
+// whole frame -> usb_web.write() never spins -> loop() never stalls here):
+//   header: [0xA8][29][T=2][count u16][total u16][loopPerSec u16][stallMs][curStage][usbdStk u16][loopStk u16]
+//                        [heapUsed u32][pollsps u16][relayps u16][crc u8][norx u8][heal u16][ringF u16]
+//   entry:  [0xA8][9][T=1][dtMs u32][evt][stage][arg u16]     (dtMs = ms before the last recorded crumb)
+//   end:    [0xA8][1][T=0]
+// The panel sends 0x10 with buf[1]=1 to (re)start (emits the header + rewinds the cursor), then 0x10 buf[1]=0
+// repeatedly; each call streams a budgeted chunk and the final call appends the end frame.
+#define WB_FLIGHT_HDR 29
+static void webusbDrainFlight(bool restart)
+{
+	if (!usb_web.connected())
+		return;
+	if (restart) {
+		faultDiagFlightDrainReset();
+		if (tud_vendor_write_available() >= 2 + WB_FLIGHT_HDR) {
+			struct FaultFlightVitals v;
+			bool have = faultDiagFlightVitals(&v);
+			if (!have)
+				memset(&v, 0, sizeof v);
+			uint16_t cnt = faultDiagFlightCount();
+			uint16_t tot = faultDiagFlightTotal();
+			uint8_t f[2 + WB_FLIGHT_HDR];
+			f[0] = 0xA8;
+			f[1] = WB_FLIGHT_HDR;
+			f[2] = 2; // header type
+			f[3] = (uint8_t)cnt;
+			f[4] = (uint8_t)(cnt >> 8);
+			f[5] = (uint8_t)tot;
+			f[6] = (uint8_t)(tot >> 8);
+			f[7] = (uint8_t)v.loopPerSec;
+			f[8] = (uint8_t)(v.loopPerSec >> 8);
+			f[9] = v.stallMs;
+			f[10] = v.curStage;
+			f[11] = (uint8_t)v.usbdStkFree;
+			f[12] = (uint8_t)(v.usbdStkFree >> 8);
+			f[13] = (uint8_t)v.loopStkFree;
+			f[14] = (uint8_t)(v.loopStkFree >> 8);
+			f[15] = (uint8_t)v.heapUsed;
+			f[16] = (uint8_t)(v.heapUsed >> 8);
+			f[17] = (uint8_t)(v.heapUsed >> 16);
+			f[18] = (uint8_t)(v.heapUsed >> 24);
+			f[19] = (uint8_t)v.pollsps;
+			f[20] = (uint8_t)(v.pollsps >> 8);
+			f[21] = (uint8_t)v.relayps;
+			f[22] = (uint8_t)(v.relayps >> 8);
+			f[23] = (uint8_t)(v.crcps > 255 ? 255 : v.crcps);
+			f[24] = (uint8_t)(v.norxps > 255 ? 255 : v.norxps);
+			f[25] = (uint8_t)v.rfHeal;
+			f[26] = (uint8_t)(v.rfHeal >> 8);
+			f[27] = (uint8_t)v.ringFault;
+			f[28] = (uint8_t)(v.ringFault >> 8);
+			f[29] = (uint8_t)0; // reserved / pad to header len
+			f[30] = (uint8_t)0;
+			usb_web.write(f, sizeof f);
+			usb_web.flush();
+		}
+	}
+	uint32_t dt = 0;
+	uint8_t evt = 0, stage = 0;
+	uint16_t arg = 0;
+	uint16_t budget = 64;
+	bool done = false;
+	while (budget--) {
+		if (tud_vendor_write_available() < 2 + 9)
+			break; // FIFO full -> resume on the panel's next 0x10 poll
+		if (!faultDiagFlightPull(&dt, &evt, &stage, &arg)) {
+			done = true;
+			break;
+		}
+		uint8_t f[2 + 9];
+		f[0] = 0xA8;
+		f[1] = 9;
+		f[2] = 1; // entry type
+		f[3] = (uint8_t)dt;
+		f[4] = (uint8_t)(dt >> 8);
+		f[5] = (uint8_t)(dt >> 16);
+		f[6] = (uint8_t)(dt >> 24);
+		f[7] = evt;
+		f[8] = stage;
+		f[9] = (uint8_t)arg;
+		f[10] = (uint8_t)(arg >> 8);
+		usb_web.write(f, sizeof f);
+		usb_web.flush();
+	}
+	if (done && tud_vendor_write_available() >= 3) {
+		uint8_t e[3] = { 0xA8, 1, 0 };
+		usb_web.write(e, 3);
+		usb_web.flush();
+	}
+}
+
 // Runs on the usbd task (registered via usbTxRegisterDrain -> tud_sof_cb). Sends the blob if loop() asked for
 // one. Keeps every usb_web write/flush off the loop task so it can't block on the device event queue.
 static void webusbSofDrain(void)
@@ -361,16 +455,17 @@ void webusbPoll()
 			if (n == 0)
 				break;
 			uint8_t op = buf[0];
-			if (op < 0x01 || op > 0x0F) { // resync: drop one byte
+			if (op < 0x01 || op > 0x10) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
 			}
-			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x05/0x0E/0x0F carry
+			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x05/0x0E/0x0F/0x10 carry
 			// one value byte; 0x02 a field+value; 0x0A a 3-byte magic.
 			uint8_t need = (op == 0x0D) ? 27 :
 				       (op == 0x02) ? 3 :
 				       (op == 0x03 || op == 0x05 ||
-					op == 0x0E || op == 0x0F) ?
+					op == 0x0E || op == 0x0F ||
+					op == 0x10) ?
 						      2 :
 				       (op == 0x0A) ? 4 :
 						      1;
@@ -393,6 +488,12 @@ void webusbPoll()
 				g_stabTest = (buf[1] != 0);
 				g_e7b = 0; // byte2=0 => host-awake
 				g_e7announce = g_stabTest;
+			}
+			// 0x10: stream the saved flight-recorder trail (0xA8 frames). buf[1]=1 restarts (header + rewind),
+			// buf[1]=0 continues the drain. Drained straight from loop context like the 0x06 capture drain --
+			// webusbDrainFlight is drop-on-full so it never blocks. Always available (recorder isn't OPK_LOG).
+			else if (op == 0x10) {
+				webusbDrainFlight(buf[1] != 0);
 			}
 #if OPK_LOG
 

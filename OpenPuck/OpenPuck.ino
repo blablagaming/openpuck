@@ -291,11 +291,15 @@ void loop()
 	NRF_WDT->RR[0] = WDT_RR_RR_Reload;
 	faultDiagBeat(); // loop heartbeat -- the SOF blob reports ms-since-beat so a wedge is visible live
 	faultDiagStackTick(); // per-task stack headroom (self-gated ~1Hz) -- usbd-overflow hypothesis check
+	faultDiagFlightTick(); // flight recorder: refresh vitals + heartbeat crumb + live CDC vitals line
 	hapticStabTask(); // stability-test keepalive buzz (no-op unless armed via WebUSB)
 	// cross-check HFCLK(micros) vs LFCLK(millis) once a second -- cheap, both builds (clone clock diagnostic)
 	clockDiagTick();
 	if (g_dirty) {
 		g_dirty = false;
+		// A bond flash write erases+programs a page with interrupts effectively stalled for ms -- a known
+		// watchdog-hang class on slow-flash clones, so leave a crumb bracketing it in the recorder.
+		faultDiagTrace(FR_SAVE, 0);
 		saveBonds();
 	}
 #if OPK_LOG

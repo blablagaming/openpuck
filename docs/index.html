@@ -204,6 +204,16 @@
       <pre id="hangOut" style="font:12px ui-monospace,Menlo,monospace;color:var(--fg);background:#0e1017;border:1px solid #232a3a;border-radius:8px;padding:10px;margin:0;max-height:260px;overflow:auto;white-space:pre"></pre>
     </div>
 
+    <div class="card wide">
+      <h2>Flight recorder</h2>
+      <p class="note" style="margin-top:0">The trail of events the firmware recorded in the seconds before its most recent <b>watchdog hang</b> — the ring survives the reset in <code>.noinit</code> RAM (like the hang PC), so it's the post-mortem of what wedged the board. Loads automatically after a hang reconnects; click to reload. Same data the console <code>FR</code> command prints. <span id="flightWedge" style="font-family:ui-monospace,Menlo,monospace"></span></p>
+      <div class="row" style="margin:0 0 8px;flex-wrap:wrap">
+        <span class="v" id="flightSummary" style="flex:1">no trail loaded</span>
+        <button id="flightLoad">Load last-hang trail</button>
+      </div>
+      <pre id="flightOut" style="font:12px ui-monospace,Menlo,monospace;color:var(--fg);background:#0e1017;border:1px solid #232a3a;border-radius:8px;padding:10px;margin:0;max-height:320px;overflow:auto;white-space:pre">—</pre>
+    </div>
+
     <div class="card wide logonly">
       <h2>Capture — host → controller commands</h2>
       <p class="note" style="margin-top:0">The firmware logs everything from boot into a big RAM ring: Steam's writes (<code>ifN</code>), the frames we transmit to the controller (<code>TX→ctlr</code>), and RF <code>LINK UP/DOWN</code> edges. For the reconnect buzz: trigger it (it appears moments after the puck boots / the controller reconnects), then connect here and click <b>Dump from boot</b> — the trigger is still in the ring. (Only present in a logging build, <code>-DOPK_LOG=1</code>.)</p>
@@ -446,6 +456,7 @@ function onGone(){
   if(stabArmed && stabStart){ up=(Date.now()-stabStart)/1000; stabLastRun={secs:up}; log("⏱ stability: stayed up "+fmtDur(up)+", then reset"); stabStart=0; }
   // queue a hang-log entry; the reason/PC/stack are filled from the first blob after reconnect
   pendingHang = { t: Date.now(), uptimeSecs: up };
+  window._flightAuto=false; // re-arm the one-shot flight-trail auto-load for the next reconnect
   polling=false; dev=null; tabInited=false; // re-default the config tab to the mode on next connect
   $("#connState").textContent="reconnecting…"; $("#connState").className="pill dn";
   $("#panel").classList.add("hide");
@@ -646,6 +657,10 @@ function applyBlob(p){
         pc:hpc?hx(hpc):"", lr:hlr?hx(hlr):"", usbd:usbdW2 });
       pendingHang=null; renderHangLog();
     }
+    // Auto-load the flight-recorder trail once per connection when the last boot was a real crash (watchdog/
+    // lockup/hardfault) -- the trail is the post-mortem of what wedged the board. Deferred to the poll loop so
+    // it doesn't nest transferIn inside this refresh.
+    if (RR_FAULT.has(code) && !window._flightAuto){ window._flightAuto=true; window._autoFlight=true; }
   }
 
   const gitDirty=(p.length>38?p[38]:0); let gitHash="";
@@ -689,7 +704,7 @@ function setSlider(id,v){ const el=$("#"+id); if(document.activeElement!==el){ e
 
 let inflight=false;
 async function refresh(){
-  if(!dev||inflight||capturing||backupBusy) return; inflight=true;
+  if(!dev||inflight||capturing||backupBusy||flightBusy) return; inflight=true;
   await send([0x01]); const p=await readBlob(); if(p) applyBlob(p);
   inflight=false;
 }
@@ -839,6 +854,73 @@ async function drainTick(){
   draining=false;
   if(liveTimer){ const el=$("#capOut"); const atBottom=el.scrollTop+el.clientHeight>=el.scrollHeight-4; renderCap(); if(atBottom) el.scrollTop=el.scrollHeight; }
 }
+// ---- Flight recorder (0xA8 stream) ----
+// The firmware keeps a .noinit ring of the last high-level events (usbd SET/GET, relays, RF up/down, radio
+// self-heal, USB mount/suspend, bond flash writes, per-250ms heartbeats) that survives a watchdog reset. On
+// 0x10 it streams them: one header (T=2, vitals@wedge + counts), then entries (T=1), then an end (T=0). We
+// pump 0x10 (restart) then 0x10 (continue) until the end frame, accumulating across FIFO-sized batches.
+let flightBusy=false, flightHdr=null, flightEvents=[];
+const FR_EVT=["none","beat","SET","GET","relay","rf-up","rf-DN","HEAL!","mount","SUSPEND","resume","OFF","RINGF","save"];
+function frEvtName(e){ return FR_EVT[e]!==undefined?FR_EVT[e]:("evt"+e); }
+async function loadFlightTrail(){
+  if(!dev||flightBusy) return; flightBusy=true;
+  $("#flightSummary").textContent="loading…";
+  flightHdr=null; flightEvents=[];
+  const STAGE_NAMES=["webusb","ctrl.task","serial","rfdiag","rflink","haptic","led","usbmount","usbtx"];
+  try{
+    let restart=true, done=false, guard=0, acc=new Uint8Array(0);
+    while(!done && guard++<600){
+      await send([0x10, restart?1:0]); restart=false;
+      const r=await dev.transferIn(epIn,192);
+      if(r.status!=="ok") break;
+      const d=new Uint8Array(r.data.buffer);
+      const m=new Uint8Array(acc.length+d.length); m.set(acc); m.set(d,acc.length); acc=m;
+      let i=0;
+      while(i<acc.length){
+        if(acc[i]!==0xA8){ i++; continue; }
+        if(i+2>acc.length) break;
+        const L=acc[i+1]; if(i+2+L>acc.length) break;
+        const f=acc.slice(i+2,i+2+L); i+=2+L;
+        const T=f[0];
+        if(T===0){ done=true; break; }
+        else if(T===2 && L>=27){
+          flightHdr={ count:f[1]|(f[2]<<8), total:f[3]|(f[4]<<8),
+            loopPerSec:f[5]|(f[6]<<8), stallMs:f[7], stage:f[8],
+            usbdStk:f[9]|(f[10]<<8), loopStk:f[11]|(f[12]<<8),
+            heap:((f[13]|(f[14]<<8)|(f[15]<<16)|(f[16]<<24))>>>0),
+            pollsps:f[17]|(f[18]<<8), relayps:f[19]|(f[20]<<8),
+            crc:f[21], norx:f[22], heal:f[23]|(f[24]<<8), ringF:f[25]|(f[26]<<8) };
+        } else if(T===1 && L>=9){
+          const dt=((f[1]|(f[2]<<8)|(f[3]<<16)|(f[4]<<24))>>>0);
+          flightEvents.push({dt, evt:f[5], stage:f[6], arg:f[7]|(f[8]<<8)});
+        }
+      }
+      acc=acc.slice(i);
+    }
+  }catch(e){ log("flight err: "+e.message); }
+  flightBusy=false;
+  renderFlight(STAGE_NAMES);
+}
+function renderFlight(STAGE_NAMES){
+  const h=flightHdr, out=$("#flightOut"), sum=$("#flightSummary"), wedge=$("#flightWedge");
+  const stage=s=>(STAGE_NAMES[s]||("st"+s));
+  if(!h || (h.count===0 && flightEvents.length===0)){
+    sum.textContent="no trail — last boot wasn't a hang, or the recorder didn't survive this board's reset";
+    wedge.textContent=""; out.textContent="—"; return;
+  }
+  const hx=v=>"0x"+v.toString(16).padStart(4,"0");
+  sum.textContent="showing "+flightEvents.length+" of "+h.total+" events before the last hang";
+  // usbd stack free trending to 0 is the leading overflow suspect -> flag it inline.
+  const usbdFlag=(h.usbdStk>0 && h.usbdStk<16)?" ⚠LOW":"";
+  wedge.innerHTML=" &nbsp;<b>@wedge:</b> stuck in "+stage(h.stage)+", stall "+h.stallMs+"ms, loop "+h.loopPerSec+"/s"
+    +" · usbdStk "+h.usbdStk+"w"+usbdFlag+" · loopStk "+h.loopStk+"w · heap "+h.heap+"B"
+    +" · poll "+h.pollsps+" relay "+h.relayps+" crc "+h.crc+" norx "+h.norx+" heal "+h.heal+" ringF "+h.ringF;
+  const pad=(s,n)=>(""+s).padEnd(n);
+  out.textContent =
+    pad("Δms",8)+pad("event",9)+pad("stage",10)+"arg\n"
+    +"".padEnd(30,"─")+"\n"
+    + flightEvents.map(e=>pad("-"+e.dt,8)+pad(frEvtName(e.evt),9)+pad(stage(e.stage),10)+hx(e.arg)).join("\n");
+}
 async function startCapture(){
   if(!dev||capturing) return;
   capturing=true; capLines=[];
@@ -857,7 +939,10 @@ async function stopCapture(){
 }
 async function startPolling(){
   polling=true; await refresh();
-  while(polling && dev){ await new Promise(r=>setTimeout(r,600)); await refresh(); }
+  while(polling && dev){
+    await new Promise(r=>setTimeout(r,600)); await refresh();
+    if(window._autoFlight){ window._autoFlight=false; await loadFlightTrail(); }
+  }
 }
 
 // UI wiring
@@ -876,6 +961,7 @@ $("#stabBtn").onclick=async()=>{
   updateStabUI();
 };
 $("#hangClear").onclick=()=>{ hangLog=[]; renderHangLog(); };
+$("#flightLoad").onclick=loadFlightTrail;
 $("#hangCsv").onclick=()=>{
   const rows=[["time","uptime_s","reason","stage","pc","lr","usbd_free_words"]].concat(
     hangLog.map(e=>[e.time, e.uptime!=null?Math.round(e.uptime):"", e.reason, e.stage, e.pc, e.lr, e.usbd]));

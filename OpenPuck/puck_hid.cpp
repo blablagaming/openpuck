@@ -3,6 +3,7 @@
 #include "config.h"
 #include "identity.h"
 #include "haptics.h"
+#include "fault_diag.h"
 #include "rf_link.h"
 #include "triton.h"
 #include "mode_lizard.h"
@@ -270,6 +271,9 @@ static void handleSet(int slot, uint8_t rid, hid_report_type_t type,
 	hapLogAdd((uint8_t)slot, cmd, b, n);
 	// ...and to the serial feature-command capture (diagnostic; drained in loop, see puckCmdLogDrain).
 	fcPush(0, slot, rid, cmd, len, pl, pln > 10 ? 10 : (uint8_t)pln);
+	// ...and to the flight recorder (survives a watchdog reset). This runs ON the fragile usbd task, so the
+	// command flood that (theory) overflows it lands in the post-mortem trail rather than being lost with USB.
+	faultDiagTrace(FR_SET, (uint16_t)((rid << 8) | cmd));
 
 	// settings/haptic/LED report (incl. 0x87 lizard-off heartbeat, SDL Triton lizard-disable)
 	if (cmd >= 0x80 && cmd <= 0x89)
@@ -550,6 +554,9 @@ static uint16_t handleGet(int slot, uint8_t rid, hid_report_type_t type,
 	if (n > reqlen)
 		n = reqlen;
 	memcpy(buf, S.resp, n);
+	// Flight recorder (every GET, un-deduped): a read STORM -- e.g. the "AE x39" identity hammering seen before
+	// the identity fix -- is itself a wedge signal, so we want it filling the post-mortem trail if it happens.
+	faultDiagTrace(FR_GET, (uint16_t)((rid << 8) | S.resp[0]));
 	// Battery diagnostic: in gamepad (Steam) mode battery is read host-side via the feature channel, NOT the
 	// forwarded 0x43 (that path is verbatim-identical to lizard mode, where battery works). Capture what Steam
 	// GETs so a WebUSB-panel (or CDC) capture in Steam mode shows the report id it polls for battery (then we

@@ -156,7 +156,7 @@ Re-flashing firmware does **not** erase the board's internal LittleFS. The paire
 - **Recovery build (`-DOPK_FACTORY_RESET=1`):** a firmware that wipes all persistent storage **once, on the first boot after flashing**, then behaves like a normal build that persists settings. Use it to recover a board from a bad config/bond without a console or panel:
 
   ```bash
-  ./gen_version.sh   # recommended: gives the build a distinct git hash (see below)
+  ./gen_version.sh   # recommended: embeds version (when tagged) + git hash provenance
   make build-recovery
   ```
 

@@ -28,7 +28,7 @@ static volatile bool g_bondExportRequest = false;
 //                [qos][persistMode][chordBtn B][chordBtn X][chordBtn Y][pollsps_lo][pollsps_hi]
 //                [loopPeriod_lo][loopPeriod_hi][loopWorstIdx][loopWorstUs_lo][loopWorstUs_hi]
 //                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
-//                [gitDirty][gitHash 12B ASCII, NUL-padded][rumbleScale][swPro120][swGyroScale10][raw accel ax ay az 3x s16 LE]
+//                [gitDirty][buildId 12B ASCII, NUL-padded][rumbleScale][swPro120][swGyroScale10][raw accel ax ay az 3x s16 LE]
 //                [bondedCount][slot0_up][slot0_batt][slot0_rssi]...[slot3_up][slot3_batt][slot3_rssi]
 //                [v10: per-type cfg, 4x8B: ET_XBOX/SWITCH/DS4/DS5 each {back0..3, qam, abSwap, padHaptics, ledBright}]
 //                [v11: resetReason(RR_* code)][resetReas raw u32 LE][rxWin/10 us][hapticBlockOn][hapticBlock s]
@@ -111,14 +111,15 @@ static void webusbSendBlob()
 	p[39] = g_linkRssi[g_curSlot >= 0 && g_curSlot < NSLOT ?
 				   g_curSlot :
 				   0]; // RAW signal strength |dBm| (0=no sample)
-	// git commit this firmware was built from + dirty flag; injected at build time
-	// (build_info.h / gen_version.sh); "unknown" if the version header wasn't generated.
+	// Build ID + dirty flag from build_info.h/gen_version.sh. Prefer semver when
+	// present, otherwise fall back to the git hash.
 	p[40] = OPK_GIT_DIRTY ? 1 : 0;
-	memset(&p[41], 0, 12); // 12B ASCII git hash, NUL-padded
+	memset(&p[41], 0, 12); // 12B ASCII build ID, NUL-padded
 	{
-		const char *h = OPK_GIT_HASH;
-		for (uint8_t i = 0; i < 12 && h[i]; i++)
-			p[41 + i] = (uint8_t)h[i];
+		const char *buildId = OPK_BUILD_VERSION[0] ? OPK_BUILD_VERSION :
+						      OPK_GIT_HASH;
+		for (uint8_t i = 0; i < 12 && buildId[i]; i++)
+			p[41 + i] = (uint8_t)buildId[i];
 	}
 	p[53] = g_rumbleScale; // rumble strength % (protocol v5)
 

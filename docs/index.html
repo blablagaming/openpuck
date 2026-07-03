@@ -132,7 +132,7 @@
         <div class="stat logonly"><div class="k">Loop period</div><div class="v" id="stLoop">—</div></div>
         <div class="stat logonly"><div class="k">Slowest stage</div><div class="v" id="stWorst">—</div></div>
         <div class="stat logonly"><div class="k">Poll period act/want</div><div class="v" id="stPollPer">—</div></div>
-        <div class="stat"><div class="k">Build (git)</div><div class="v" id="stBuild">—</div></div>
+        <div class="stat"><div class="k">Build</div><div class="v" id="stBuild">—</div></div>
         <div class="stat"><div class="k">Last reset</div><div class="v" id="stReset">—</div></div>
       </div>
       <p class="note" style="margin-top:6px"><strong>Reset detail:</strong> <span id="resetHist" style="font-family:ui-monospace,Menlo,monospace">—</span><br>
@@ -739,10 +739,10 @@ function applyBlob(p){
     if (RR_FAULT.has(code) && !window._flightAuto){ window._flightAuto=true; window._autoFlight=true; }
   }
 
-  const gitDirty=(p.length>38?p[38]:0); let gitHash="";
-  for(let i=39;i<51 && i<p.length && p[i];i++) gitHash+=String.fromCharCode(p[i]);
-  $("#stBuild").innerHTML = gitHash
-    ? (gitHash + (gitDirty ? ' <span class="pill dn">dirty</span>' : ' <span class="pill up">clean</span>'))
+  const gitDirty=(p.length>38?p[38]:0); let buildId="";
+  for(let i=39;i<51 && i<p.length && p[i];i++) buildId+=String.fromCharCode(p[i]);
+  $("#stBuild").innerHTML = buildId
+    ? (buildId + (gitDirty ? ' <span class="pill dn">dirty</span>' : ' <span class="pill up">clean</span>'))
     : "—";
   setSlider("mDiv",mDiv); setSlider("mFric",mFric); setSlider("rumble",rumbleScale);
   $("#persistMode").textContent = persistMode? "on":"off"; $("#persistMode").classList.toggle("active",!!persistMode);

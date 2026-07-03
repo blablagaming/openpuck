@@ -604,34 +604,36 @@ void hapticOnReconnect(int slot)
 void hapticTask()
 {
 	// id9 steering (SET_SETTINGS index 9 = digital-mappings / the controller's AUTONOMOUS mapping+haptic
-	// engine). Two regimes, switched by who is actually driving:
-	//  - Steam DRIVING (MODE_STEAM + heartbeat alive): hold id9=0 every LIZKEEP_MS, the way the real puck
-	//    does (sniff1.json) -- keeps the autonomous engine off so Steam owns haptics and the engine can't
-	//    latch the "deep-inside" reconnect buzz. 0x87 is change-guarded in the controller, so the repeat
-	//    is silent (no 0x81-style click).
-	//  - lizard PRESENTING (pure MODE_LIZARD, or MODE_STEAM with Steam closed): land id9=1 ONCE per
-	//    connect/lizard episode. id9 gates the whole autonomous pad layer INCLUDING the trackpad ticks --
-	//    the old always-in-MODE_STEAM id9=0 hold is why Steam-closed lizard lost its ticks, and a stale
-	//    id9=0 from a previous Steam session (mode switch without a controller power cycle) is why pure
-	//    lizard could come up tickless too. Landing 1 explicitly restores the pad layer immediately
-	//    instead of waiting for the controller's revert timer (which also resets settings = audible pop).
-	// Emulated modes (Xbox/Switch/DS) are untouched: lizardActive() is false there and the id9=0 hold
-	// stays scoped to MODE_STEAM, exactly as before.
-	if (g_lizKeep && modeIsPuck(g_usbMode)) {
+	// engine, which is what generates the trackpad tick haptics). We decide per mode whether that autonomous
+	// engine should be ON, then either land id9=1 ONCE per connect episode (engine on) or hold id9=0 every
+	// LIZKEEP_MS (engine off). id9 gates the whole autonomous pad layer INCLUDING the trackpad ticks; 0x87 is
+	// change-guarded in the controller so a repeated same-value write is silent (no 0x81-style click), and
+	// re-landing id9=1 on (re)connect restores the pad layer immediately instead of waiting for the
+	// controller's revert timer (which also resets all settings = audible pop).
+	//
+	// wantAuto = should the controller run its own pad layer (trackpad ticks) for the ACTIVE mode?
+	//  - puck modes (STEAM/LIZARD): ON while we present lizard (pure MODE_LIZARD, or MODE_STEAM with Steam
+	//    closed) so the pad keeps its ticks; OFF when Steam is driving (Steam owns haptics, and holding the
+	//    engine off stops it latching the deep-inside reconnect buzz). = puckLizardActive().
+	//  - emulated modes (Xbox/Switch/DS): follow the per-type trackpad-haptics config g_padHaptics (default
+	//    ON; Switch defaults OFF). This is the MIRROR of the lizard case -- here holding id9=0 is how we turn
+	//    the controller's autonomous trackpad haptics OFF for a type that doesn't want them.
+	if (g_lizKeep) {
 		static unsigned long lastKeep[NSLOT] = { 0 };
 		static bool landedAuto[NSLOT] = { false };
 		static const uint8_t K0[3] = { 0x09, 0x00, 0x00 };
 		static const uint8_t K1[3] = { 0x09, 0x01, 0x00 };
-		bool liz = puckLizardActive();
+		bool wantAuto = modeIsPuck(g_usbMode) ? puckLizardActive() :
+							(g_padHaptics != 0);
 		for (int s = 0; s < NSLOT; s++) {
 			if (!g_slot[s].used || !hapticLinkUp(s)) {
-				// re-land id9=1 on the next (re)connect: a fresh controller defaults to
-				// autonomous, but one carrying our previous session's id9=0 does not
+				// re-land id9 on the next (re)connect: a fresh controller defaults to
+				// autonomous, but one carrying our previous session's id9 does not
 				landedAuto[s] = false;
 				lastKeep[s] = 0;
 				continue;
 			}
-			if (liz) {
+			if (wantAuto) {
 				if (!landedAuto[s]) {
 					landedAuto[s] = true;
 					relayEnqueue(0x87, K1, sizeof K1,

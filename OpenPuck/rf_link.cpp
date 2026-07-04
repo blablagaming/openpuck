@@ -196,17 +196,19 @@ static void rfHostFrameOnce(int slot, bool discovery)
 	NRF_RADIO->TASKS_TXEN = 1;
 	RWAIT_DISABLED();
 	NRF_RADIO->EVENTS_DISABLED = 0;
+	// Session keepalive: the controller answers E3 polls, not beacons.
+	// No reply ever arrives here, so skip the RX window entirely --
+	// radio is already disabled from the TX END_DISABLE short.
+	if (!discovery)
+		return;
+	// Discovery/pairing beacons listen for a controller response (needed for pairing/RE).
 	NRF_RADIO->PACKETPTR = (uint32_t)rfrx;
 	rfrx[0] = 0;
 	NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk;
 	NRF_RADIO->EVENTS_END = 0;
 	NRF_RADIO->TASKS_RXEN = 1;
-	// Discovery/pairing beacons listen for the controller's response (matters for RE/pairing); the connected
-	// session keepalive expects NO response (the controller answers E3 polls, not the beacon), so don't burn
-	// 800us of dead air per frame -- that was the bulk of the idle poll-rate deficit (40 beacons/s x slots).
-	uint16_t bwin = discovery ? 800u : 150u;
 	uint32_t t0 = micros();
-	while (!NRF_RADIO->EVENTS_END && (micros() - t0) < bwin) {
+	while (!NRF_RADIO->EVENTS_END && (micros() - t0) < 800u) {
 	}
 	if (NRF_RADIO->EVENTS_END) {
 		// any reception = controller answered our frame
@@ -907,6 +909,13 @@ static void rfConnStep()
 
 void rfLinkTask()
 {
+	// Poll the controller first so the cycle gate fires as close to its 4 ms deadline
+	// as possible -- beacon TX overhead (up to 3.6 ms for 4 slots) used to run before
+	// this check and push the gate late, shortening the effective poll rate.
+	if (g_connOn && millis() - g_connCooldown > 2500) {
+		rfConnStep();
+	} // connected-mode: poll controller, read input
+
 	// Host-frame beacon: sent continuously, INCLUDING while connected. The controller uses the periodic E1 (the
 	// real puck's per-hop-cycle announce) to stay synced and keep answering polls at full rate; suppressing it
 	// drops the reply rate from ~210/s to ~38/s. Paused only during the post-disconnect cooldown so a controller
@@ -937,9 +946,6 @@ void rfLinkTask()
 				rfHostFrameOnce(s, true);
 		}
 	}
-	if (g_connOn && millis() - g_connCooldown > 2500) {
-		rfConnStep();
-	} // connected-mode: poll controller, read input
 
 	// Release stale input on a per-slot link-drop edge. g_in[s] is refreshed ONLY
 	// by the 0x45 decode on a fresh reply, so once a controller goes silent the

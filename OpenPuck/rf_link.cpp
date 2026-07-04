@@ -196,12 +196,14 @@ static void rfHostFrameOnce(int slot, bool discovery)
 	NRF_RADIO->TASKS_TXEN = 1;
 	RWAIT_DISABLED();
 	NRF_RADIO->EVENTS_DISABLED = 0;
+
 	// Session keepalive: the controller answers E3 polls, not beacons.
-	// No reply ever arrives here, so skip the RX window entirely --
-	// radio is already disabled from the TX END_DISABLE short.
+	// No reply arrives here; radio is already disabled from the TX
+	// END_DISABLE short, so skip the RX window entirely.
 	if (!discovery)
 		return;
-	// Discovery/pairing beacons listen for a controller response (needed for pairing/RE).
+
+	// Discovery/pairing beacons listen for the controller's response.
 	NRF_RADIO->PACKETPTR = (uint32_t)rfrx;
 	rfrx[0] = 0;
 	NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk;
@@ -909,9 +911,9 @@ static void rfConnStep()
 
 void rfLinkTask()
 {
-	// Poll the controller first so the cycle gate fires as close to its 4 ms deadline
-	// as possible -- beacon TX overhead (up to 3.6 ms for 4 slots) used to run before
-	// this check and push the gate late, shortening the effective poll rate.
+	// Poll before beacons: the cycle gate must fire as close to its
+	// 4 ms deadline as possible; beacon TX (up to 3.6 ms for 4 slots)
+	// runs after so it never delays the current poll.
 	if (g_connOn && millis() - g_connCooldown > 2500) {
 		rfConnStep();
 	} // connected-mode: poll controller, read input

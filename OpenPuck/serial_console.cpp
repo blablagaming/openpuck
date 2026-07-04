@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// CDC commands: l=listen, s=stop, cN=channel, p<hex>=prefix, a<8hex>=base addr, b=bonds, etc.
+// CDC commands: l=listen, s=stop, cN=channel, p<hex>=prefix, a<8hex>=base addr, b=bonds, UF2NEXT, etc.
 // Command order matters: else-if chain, FIRST matching letter wins. 'C' and 'H' appear twice; the second
 // occurrence is unreachable.
 void serialConsolePoll()
@@ -53,6 +53,14 @@ void serialConsolePoll()
 					"# feature-cmd capture %s (I45 %s)\n",
 					g_cmdCapture ? "ON" : "off",
 					g_cmdCapture ? "suppressed" : "on");
+			} else if (!strcmp(line, "UF2NEXT")) {
+				armUf2NextBoot();
+				Serial.println(
+					"# UF2 bootloader armed for NEXT reboot (firmware update applies on reboot)");
+			} else if (!strcmp(line, "UF2CLR")) {
+				clearUf2NextBoot();
+				Serial.println(
+					"# UF2 next-boot arm cleared (normal app boot on reboot)");
 			} else if (!strcmp(line, "L87")) {
 				// EXPERIMENT: land all relayed 0x87 config verbatim (real-puck relay) vs the discard-whitelist.
 				// Exact-match string (single letters are all taken; 'l' alone = rfListenStart).

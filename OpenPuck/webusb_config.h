@@ -2,6 +2,7 @@
 // read/set runtime tunables. Binary framed protocol:
 //   host->dev:  0x01                 GET  -> reply status blob
 //               0x02 <field> <value> SET one byte field (see the switch in webusb_config.cpp)
+//                                      field 30 arms/clears "enter UF2 on next reboot" (1/0)
 //               0x03 <mode>          switch USB mode (0..6): persist + reboot
 //               0x0B                 reboot into serial DFU (adafruit-nrfutil)
 //               0x0C                 reboot into UF2 bootloader (USB mass storage)

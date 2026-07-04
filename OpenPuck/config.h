@@ -103,6 +103,12 @@ extern uint8_t g_chordBtn[3]; // back4+B/X/Y -> these modes (A always STEAM)
 extern bool g_persistMode;
 // one-shot: boot into this mode once then clear (!persistMode + explicit switch)
 extern uint8_t g_bootMode;
+// one-shot: reboot into UF2 bootloader once (apply staged update), then clear
+extern uint8_t g_bootUf2;
+// decision for THIS boot: true => enter UF2 bootloader before normal init
+extern bool g_bootUf2ThisBoot;
+void armUf2NextBoot(); // persist the one-shot UF2 arm (caller reboots later)
+void clearUf2NextBoot(); // clear a previously-armed one-shot UF2 entry
 
 // One-shot debug CDC. Puck mode normally DROPS the CDC serial console to free the USB endpoint its wake-mouse
 // interface needs (to wake a sleeping Windows host). Arming this keeps CDC for the NEXT boot only -- dropping

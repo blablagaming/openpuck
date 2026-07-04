@@ -112,6 +112,10 @@ void setup()
 	factoryResetOnce(OPK_GIT_HASH);
 #endif
 	loadCfg();
+	if (g_bootUf2ThisBoot) {
+		delay(40);
+		enterUf2Dfu();
+	}
 	loadBonds();
 	// regenerate per-slot session addresses from each bond UUID (deterministic, stable across reboots)
 	for (int s = 0; s < NSLOT; s++)

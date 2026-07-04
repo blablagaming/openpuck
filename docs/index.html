@@ -71,6 +71,7 @@
   <button id="debugCdc" title="Reboot ONCE with the CDC serial console enabled (WebUSB goes away for that boot); auto-reverts on the next boot">Debug CDC</button>
   <button id="dfuSerial" title="Reboot into serial DFU (adafruit-nrfutil), then replug">Serial DFU</button>
   <button id="dfuUf2" title="Reboot into the UF2 mass-storage bootloader; then use Write UF2 file">UF2 DFU</button>
+  <button id="uf2Next" title="Arm/clear one-shot updater mode: the next reboot enters UF2 bootloader">UF2 on reboot</button>
   <button id="factoryErase" class="danger" title="Wipe ALL bonds + settings and reboot to defaults. You must re-pair. Cannot be undone.">⚠ Factory erase</button>
 </div>
 <div class="wrap">
@@ -766,6 +767,8 @@ function applyBlob(p){
   $("#persistMode").textContent = persistMode? "on":"off"; $("#persistMode").classList.toggle("active",!!persistMode);
   // land-all-0x87 experiment toggle (blob v14, firmware p[177] -> JS p[175])
   { const la=(p.length>175?p[175]:0); $("#landAll87").textContent = la?"on":"off"; $("#landAll87").classList.toggle("active",!!la); }
+  // one-shot UF2 updater arm (blob v15, firmware p[178] -> JS p[176])
+  { const u=(p.length>176?p[176]:0); $("#uf2Next").textContent = u?"UF2 on reboot: armed":"UF2 on reboot"; $("#uf2Next").classList.toggle("active",!!u); }
   // per-type button config (blob v10): 4 types x 8 bytes. readBlob() strips the 2-byte [0xA5][len] header, so
   // the firmware's buffer index 75 lands at JS index 73 here.
   if(p.length>=73+TYPE_DEFS.length*8){
@@ -1152,6 +1155,12 @@ $("#dfuUf2").onclick=async()=>{
   if(!dev){ log("not connected"); return; }
   if(!confirm("Reboot into UF2 bootloader?\n\nThe puck will disconnect and mount as a USB drive. Drag the .uf2 file onto it to flash.")) return;
   await send([0x0C]); log("UF2 bootloader reboot sent — device disconnecting");
+};
+$("#uf2Next").onclick=async()=>{
+  if(!dev){ log("not connected"); return; }
+  const on=$("#uf2Next").classList.contains("active");
+  await setField(30, on?0:1);
+  log(on?"UF2-on-reboot cleared":"UF2-on-reboot armed — next reboot enters UF2 bootloader");
 };
 $("#factoryErase").onclick=async()=>{
   if(!dev){ log("not connected"); return; }

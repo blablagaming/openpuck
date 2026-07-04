@@ -135,6 +135,10 @@ If the board has the **Adafruit nRF52 UF2 bootloader** (common on Pro Micro nRF5
 
 3. **Copy the `.uf2` file** onto the UF2BOOT drive. The board auto-ejects and reboots with the new firmware.
 
+You can also arm a **deferred UF2 update** from the running firmware (no immediate reboot): in the WebUSB panel,
+click **UF2 on reboot** so it shows "armed". The device stores a one-shot flag in config; on the **next reboot**
+it jumps straight to UF2 bootloader before normal app init. Use the same button again to clear the arm.
+
 Alternatively, use the **adafruit-nrfutil DFU** Python tool with the board in DFU mode (bootloader LED pulsing):
 
 ```bash

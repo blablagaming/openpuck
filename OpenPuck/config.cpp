@@ -13,11 +13,15 @@ uint8_t g_chordBtn[3] = {
 }; // back4+B/X/Y -> these modes (A always STEAM); Y defaults to Switch Pro
 bool g_persistMode = false;
 uint8_t g_bootMode = 0xFF;
+uint8_t g_bootUf2 = 0;
+bool g_bootUf2ThisBoot = false;
 
 bool g_debugCdcThisBoot = false;
 
 // persisted one-shot arm, stored in Cfg.rsvd0 (1 = keep CDC for the next boot)
 static uint8_t g_debugCdc = 0;
+// one-shot UF2 arm token, stored in Cfg.rxWin10 (legacy field no longer used)
+static const uint8_t BOOT_UF2_ARM = 0xA5;
 
 int g_mDiv = 64, g_mFric = 94;
 
@@ -76,7 +80,8 @@ const uint32_t g_pollUs = POLL_US_DEFAULT;
 struct Cfg {
 	uint8_t magic, mode, mDiv, mFric, rsvd0, pollU100, persistMode,
 		bootMode, chordBtn[3], rumbleScale;
-	// rxWin10: legacy RF tunable slot (window now fixed; ignored). lizKeep: the id9=0 hold enable (see
+	// rxWin10: one-shot UF2 boot arm token (legacy RF tunable slot, window now fixed). lizKeep: the id9=0 hold
+	// enable (see
 	// haptics.h LIZKEEP_MS). landAll87: the verbatim-0x87-relay experiment toggle (haptics.h g_landAll87).
 	uint8_t rxWin10, lizKeep, landAll87;
 	TypeCfg type[ET_COUNT]; // per-emulated-type back/qam/abSwap/padHaptics
@@ -94,7 +99,7 @@ void saveCfg()
 		  g_bootMode,
 		  { g_chordBtn[0], g_chordBtn[1], g_chordBtn[2] },
 		  g_rumbleScale,
-		  (uint8_t)(g_rxWin / 10),
+		  g_bootUf2,
 		  g_lizKeep,
 		  g_landAll87,
 		  {} };
@@ -125,6 +130,12 @@ void loadCfg()
 			g_debugCdcThisBoot = c.rsvd0 ? true : false;
 			if (c.rsvd0) {
 				g_debugCdc = 0;
+				consume = true;
+			}
+			// one-shot UF2 boot (Cfg.rxWin10): honor once, then clear.
+			g_bootUf2ThisBoot = (c.rxWin10 == BOOT_UF2_ARM);
+			if (g_bootUf2ThisBoot) {
+				g_bootUf2 = 0;
 				consume = true;
 			}
 			// poll rate is fixed; rewrite cfg so the persisted byte matches the new default.
@@ -158,7 +169,11 @@ void loadCfg()
 			// verbatim-0x87-relay experiment toggle (0/1; default off)
 			if (c.landAll87 <= 1)
 				g_landAll87 = c.landAll87;
-			// The poll RX window is now FIXED (g_rxWin is const) -- any persisted rxWin10 is ignored.
+			// Keep only our explicit arm token; old legacy values never arm UF2 by accident.
+			if (c.rxWin10 == BOOT_UF2_ARM)
+				g_bootUf2 = BOOT_UF2_ARM;
+			else
+				g_bootUf2 = 0;
 		}
 		f.close();
 	}
@@ -187,6 +202,18 @@ void armDebugCdcNextBoot()
 	g_debugCdc = 1;
 	saveCfg();
 } // next boot keeps CDC; loadCfg() consumes it after
+
+void armUf2NextBoot()
+{
+	g_bootUf2 = BOOT_UF2_ARM;
+	saveCfg();
+}
+
+void clearUf2NextBoot()
+{
+	g_bootUf2 = 0;
+	saveCfg();
+}
 
 // FULL factory wipe: reformat the internal LittleFS, erasing cfg.bin (modes/tunables/chords) AND bonds.bin
 // (paired-controller record). Caller reboots: next boot finds no files and falls back to clean defaults, and

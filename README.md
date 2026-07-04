@@ -50,7 +50,7 @@ Additionally it has some shortcuts that might be useful: Steam + L5/R5 will do v
 and Steam + L4 ls Ctrl + Alt + Delete.
 
 # How to install/use it
-You will need to flash OpenPuck.ino onto a compatible microcontroller. The easiest way to do this is to grab a uf2 file from the GitHub releases and drag and drop it onto the folder that the microcontroller mounts when in DFU mode. Fresh microcontrollers should already be in DFU mode and present like a flash drive. If they are not in DFU mode you'll need to short the RST and GND pints twice in quick succession. If you've already flashed openpuck you can go to the [webusb configurator](https://safijari.github.io/openpuck/), connect to the OpenPuck, and then press the `UF2 DFU` button on the top bar.
+You will need to flash OpenPuck.ino onto a compatible microcontroller. The easiest way to do this is to grab a uf2 file from the GitHub releases and drag and drop it onto the folder that the microcontroller mounts when in DFU mode. Fresh microcontrollers should already be in DFU mode and present like a flash drive. If they are not in DFU mode you'll need to short the RST and GND pints twice in quick succession. If you've already flashed openpuck you can go to the [webusb configurator](https://safijari.github.io/openpuck/), connect to the OpenPuck, and then press the `UF2 DFU` button on the top bar. If you want to stage it for later, `UF2 on reboot` arms a one-shot flag so the *next* reboot lands in UF2 bootloader automatically.
 
 See [build instructions document](./docs/BUILD_AND_DEPLOY.md) for  details on how to flash the MCU during development.
 

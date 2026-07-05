@@ -135,10 +135,6 @@ If the board has the **Adafruit nRF52 UF2 bootloader** (common on Pro Micro nRF5
 
 3. **Copy the `.uf2` file** onto the UF2BOOT drive. The board auto-ejects and reboots with the new firmware.
 
-You can also arm a **deferred UF2 update** from the running firmware (no immediate reboot): in the WebUSB panel,
-click **UF2 on reboot** so it shows "armed". The device stores a one-shot flag in config; on the **next reboot**
-it jumps straight to UF2 bootloader before normal app init. Use the same button again to clear the arm.
-
 Alternatively, use the **adafruit-nrfutil DFU** Python tool with the board in DFU mode (bootloader LED pulsing):
 
 ```bash
@@ -152,6 +148,21 @@ adafruit-nrfutil --verbose dfu serial --package OpenPuck/OpenPuck.ino.adafruit_n
 Replace the port (`/dev/ttyACM0` / `COM5`) with the actual board port.
 
 > **Note:** The `.zip` package is generated automatically by `arduino-cli compile` when the Adafruit nRF52 core is used. If it is missing, ensure `adafruit-nrfutil` is installed and recompile.
+
+### Flashing from the WebUSB panel (no tools, no drag-and-drop)
+
+A board already running OpenPuck (status protocol v15+) can be updated entirely from the
+[WebUSB configurator](https://safijari.github.io/openpuck/): **Pick UF2 file** → **Flash firmware**. The panel
+extracts the app image from the `.uf2` and streams it over the normal WebUSB connection into spare flash high
+in the app region (~15 s; the running firmware keeps working); the firmware CRC32-verifies what landed and
+commits a one-page "apply on reboot" record; a final automatic reboot copies staged→app from RAM (~5 s dark)
+and comes back up on the new firmware, where the panel reconnects. See `OpenPuck/fw_update.h` for the design.
+
+Failure safety: **nothing is armed until the staged image verifies in flash**, so a disconnect, error, or
+power cut during the transfer leaves the current firmware untouched. The apply step erases the app's vector
+page first and rewrites it last (first word dead-last), so even a power cut mid-apply leaves the board
+"app-less" — the resident UF2 bootloader then keeps it as the UF2BOOT drive for drag-and-drop recovery. A
+half-flashed, crash-looping state is not reachable.
 
 ## 6. Factory reset (erase persistent storage)
 

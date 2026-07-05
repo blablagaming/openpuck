@@ -66,12 +66,11 @@
   <button id="connectBtn" class="primary">Connect</button>
   <span class="spacer"></span>
   <input id="uf2File" class="hide" type="file" accept=".uf2,application/octet-stream">
-  <button id="uf2Pick" title="Choose a local .uf2 firmware file">Pick UF2 file</button>
-  <button id="uf2Flash" disabled title="Copy the selected .uf2 onto the UF2BOOT/NRF52BOOT drive">Write UF2 file</button>
+  <button id="uf2Pick" title="Choose a local .uf2 firmware file to flash">Pick UF2 file</button>
+  <button id="uf2Flash" disabled title="Pick a .uf2 file first">Flash firmware</button>
   <button id="debugCdc" title="Reboot ONCE with the CDC serial console enabled (WebUSB goes away for that boot); auto-reverts on the next boot">Debug CDC</button>
   <button id="dfuSerial" title="Reboot into serial DFU (adafruit-nrfutil), then replug">Serial DFU</button>
-  <button id="dfuUf2" title="Reboot into the UF2 mass-storage bootloader; then use Write UF2 file">UF2 DFU</button>
-  <button id="uf2Next" title="Arm/clear one-shot updater mode: the next reboot enters UF2 bootloader">UF2 on reboot</button>
+  <button id="dfuUf2" title="Reboot into the UF2 mass-storage bootloader; drop a .uf2 on the drive">UF2 DFU</button>
   <button id="factoryErase" class="danger" title="Wipe ALL bonds + settings and reboot to defaults. You must re-pair. Cannot be undone.">⚠ Factory erase</button>
 </div>
 <div class="wrap">
@@ -253,7 +252,10 @@ let lastP=null; // most recent status-blob payload (config source for Export)
 // Stability test: armed = active across reconnects; stabStart = ms of the current run; stabLastRun = last
 // completed run {secs} (ended by a reset). Kept in-page so it survives the device reset (not a page refresh).
 let stabArmed=false, stabStart=0, stabLastRun=null;
-let selectedUf2File=null;
+// Firmware update via the UF2 picker: selectedUf2 = {name, image} (image = the app binary extracted from the
+// .uf2 at pick time, so a bad file is rejected before anything is sent). dfuBusy blocks re-entry while an
+// update is in flight.
+let selectedUf2=null, dfuBusy=false;
 // Running hang log: one entry per reset (persists in-page across the device reset; a page refresh clears it).
 // pendingHang is set at disconnect and enriched with reason/PC/stack from the first blob after reconnect.
 let hangLog=[], pendingHang=null;
@@ -268,19 +270,15 @@ function renderHangLog(){
     + hangLog.map(e=>pad(e.time,11)+pad(e.uptime!=null?fmtDur(e.uptime):"-",9)+pad(e.reason,16)+pad(e.stage||"-",10)+pad(e.pc||"-",11)+(e.usbd!=null?e.usbd:"-")).join("\n");
 }
 function fmtDur(s){ s=Math.round(s); return s>=60 ? (Math.floor(s/60)+"m "+(s%60)+"s") : (s+"s"); }
-function updateUf2UI(){
+function updateUf2UI(txt){
   const pick=$("#uf2Pick"), flash=$("#uf2Flash");
   if(!pick || !flash) return;
-  const supportsDirectoryPicker = typeof window.showDirectoryPicker === "function";
-  flash.disabled = !selectedUf2File || !supportsDirectoryPicker;
-  pick.textContent = selectedUf2File ? ("UF2: " + selectedUf2File.name) : "Pick UF2 file";
-  if(!supportsDirectoryPicker){
-    flash.title = "Your browser does not support writing files from the panel";
-  } else if(!selectedUf2File){
-    flash.title = "Pick a .uf2 file first";
-  } else {
-    flash.title = "Copy " + selectedUf2File.name + " onto the UF2BOOT/NRF52BOOT drive";
-  }
+  pick.textContent = selectedUf2 ? ("UF2: " + selectedUf2.name) : "Pick UF2 file";
+  flash.disabled = dfuBusy || !selectedUf2;
+  flash.textContent = txt || "Flash firmware";
+  flash.title = selectedUf2
+    ? "Send " + selectedUf2.name + " to the puck over WebUSB, verify it, and apply it on reboot"
+    : "Pick a .uf2 file first";
 }
 function updateStabUI(){
   const btn=$("#stabBtn"), st=$("#stabStatus");
@@ -767,8 +765,6 @@ function applyBlob(p){
   $("#persistMode").textContent = persistMode? "on":"off"; $("#persistMode").classList.toggle("active",!!persistMode);
   // land-all-0x87 experiment toggle (blob v14, firmware p[177] -> JS p[175])
   { const la=(p.length>175?p[175]:0); $("#landAll87").textContent = la?"on":"off"; $("#landAll87").classList.toggle("active",!!la); }
-  // one-shot UF2 updater arm (blob v15, firmware p[178] -> JS p[176])
-  { const u=(p.length>176?p[176]:0); $("#uf2Next").textContent = u?"UF2 on reboot: armed":"UF2 on reboot"; $("#uf2Next").classList.toggle("active",!!u); }
   // per-type button config (blob v10): 4 types x 8 bytes. readBlob() strips the 2-byte [0xA5][len] header, so
   // the firmware's buffer index 75 lands at JS index 73 here.
   if(p.length>=73+TYPE_DEFS.length*8){
@@ -1083,37 +1079,162 @@ async function startPolling(){
 
 // UI wiring
 $("#connectBtn").onclick=connect;
+// ---- Firmware update: UF2 file -> staged flash over WebUSB, applied on reboot ----
+// Flow: parse the .uf2 into the raw app image, stream it over THIS WebUSB connection (ops 0x20/0x21/0x22,
+// strict ping-pong on the firmware's 0xAB acks) into spare flash high in the puck's app region, let the
+// firmware CRC32-verify what actually landed and commit the one-page "apply on reboot" record, then send a
+// plain reboot (0x23) — the puck copies staged->app from RAM on the way up and re-enumerates on the new
+// firmware, where this panel auto-reconnects. Corruption safety (matches fw_update.h in the firmware):
+//   - nothing is armed until the staged bytes verify IN FLASH, so any failure/disconnect/power-cut during
+//     the transfer leaves the current firmware completely untouched;
+//   - the boot-time apply orders its writes so an interruption leaves the board app-less (UF2 bootloader
+//     mass-storage recovery), never a crash-looping half image.
+const UF2_MAGIC0=0x0A324655, UF2_MAGIC1=0x9E5D5157, UF2_MAGIC_END=0x0AB16F30, UF2_FAMILY=0xADA52840;
+const APP_BASE=0x26000, FWUP_MAX_IMG=0x60000; // nRF52840 app base; staging cap (fw_update.h FWUP_MAX_IMG)
+// Extract the contiguous application image from a .uf2 (gaps filled with 0xFF, length padded to a word).
+// Throws on anything that is not an nRF52840 app-region UF2 — the firmware re-checks everything, but a bad
+// file should fail at pick time, not after a reboot.
+function uf2ToImage(buf){
+  if(!buf.byteLength || buf.byteLength%512) throw new Error("not a UF2 (size is not a multiple of 512)");
+  const dv=new DataView(buf), blocks=[]; let lo=Infinity, hi=0;
+  for(let off=0; off<buf.byteLength; off+=512){
+    if(dv.getUint32(off,true)!==UF2_MAGIC0 || dv.getUint32(off+4,true)!==UF2_MAGIC1 || dv.getUint32(off+508,true)!==UF2_MAGIC_END)
+      throw new Error("bad UF2 block magic at offset "+off);
+    const flags=dv.getUint32(off+8,true), addr=dv.getUint32(off+12,true), len=dv.getUint32(off+16,true);
+    if(flags&0x00000001) continue; // NOT_MAIN_FLASH
+    if((flags&0x00002000) && dv.getUint32(off+28,true)!==UF2_FAMILY)
+      throw new Error("UF2 family 0x"+dv.getUint32(off+28,true).toString(16)+" is not nRF52840 (0xada52840)");
+    if(len<1 || len>476) throw new Error("bad UF2 payload size "+len);
+    blocks.push({addr,len,off}); lo=Math.min(lo,addr); hi=Math.max(hi,addr+len);
+  }
+  if(!blocks.length) throw new Error("UF2 contains no flash data");
+  if(lo!==APP_BASE) throw new Error("image base 0x"+lo.toString(16)+" is not the app region (0x26000) — not an OpenPuck app UF2");
+  if(hi-lo>FWUP_MAX_IMG) throw new Error("image is "+Math.round((hi-lo)/1024)+" KiB — over the 384 KiB staged-update cap; flash it via UF2 DFU + drag-and-drop");
+  const img=new Uint8Array((hi-lo+3)&~3).fill(0xFF); // firmware stages whole words
+  for(const b of blocks) img.set(new Uint8Array(buf,b.off+32,b.len), b.addr-lo);
+  return img;
+}
+// CRC32 (IEEE, reflected, init/xorout 0xFFFFFFFF) — must match crc32Step/crc32Flash in fw_update.cpp
+function crc32(u8){
+  let c=0xFFFFFFFF;
+  for(let i=0;i<u8.length;i++){
+    c^=u8[i];
+    for(let k=0;k<8;k++) c=(c>>>1)^(0xEDB88320&-(c&1));
+  }
+  return (~c)>>>0;
+}
+const u32le=v=>[v&0xFF,(v>>>8)&0xFF,(v>>>16)&0xFF,(v>>>24)&0xFF];
+const dfuSleep=ms=>new Promise(r=>setTimeout(r,ms));
+const FWUP_ERR=["ok","command out of sequence","image too big for this puck's free flash","offset resync",
+  "staged bytes failed CRC verify","staged image has no valid vector table"];
+// Ack reader ([0xAB][5][status][nextOff u32 LE]). One persistent transferIn at a time: a wait that times out
+// leaves its read PENDING for the next wait — issuing a second concurrent read would silently eat the data
+// the first one eventually resolves with. If one read carries several acks (a retried command double-acks),
+// only the LAST — the firmware's newest state — is returned, so stale acks collapse instead of accumulating.
+let fwupRead=null;
+async function fwupAckWait(timeoutMs){
+  const deadline=Date.now()+timeoutMs;
+  for(;;){
+    const remain=deadline-Date.now();
+    if(remain<=0) return null;
+    if(!fwupRead) fwupRead=dev.transferIn(epIn, 64);
+    const r=await Promise.race([fwupRead, dfuSleep(remain).then(()=>"timeout")]);
+    if(r==="timeout") return null;
+    fwupRead=null;
+    if(r.status!=="ok") continue;
+    const d=new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+    let ack=null;
+    for(let i=0;i+6<d.length;i++)
+      if(d[i]===0xAB && d[i+1]===5)
+        ack={status:d[i+2], off:(d[i+3]|(d[i+4]<<8)|(d[i+5]<<16)|(d[i+6]<<24))>>>0};
+    if(ack) return ack;
+  }
+}
+const fwupSend=cmd=>dev.transferOut(epOut, new Uint8Array(cmd));
+// send a control op (begin/end/abort — all idempotent on the firmware side) and wait; resend on timeout
+async function fwupCtl(cmd, timeoutMs, label){
+  for(let t=0;t<3;t++){
+    await fwupSend(cmd);
+    const a=await fwupAckWait(timeoutMs);
+    if(a) return a;
+  }
+  throw new Error("no response to "+label);
+}
+async function fwupRun(image){
+  const kb=Math.round(image.length/1024);
+  fwupRead=null; // never reuse a read pending against a previous session/device
+  // drain anything stale on the IN pipe (leftover ack from an aborted run, a late status blob)
+  while(await fwupAckWait(400)!==null){}
+  log("firmware update: staging "+kb+" KiB into the puck's spare flash — input may stutter briefly during page erases");
+  let a=await fwupCtl([0x20,...u32le(image.length),...u32le(crc32(image))],4000,"begin");
+  if(a.status) throw new Error("begin rejected: "+(FWUP_ERR[a.status]||("code "+a.status)));
+  // Chunk loop: send one chunk, then read acks until one shows progress. A TIMEOUT resends (covers a truly
+  // lost command); a stale no-progress ack (the surplus twin of a resent chunk) is read past WITHOUT
+  // resending, so retries can't snowball. The ack's nextOff is authoritative — the firmware skips duplicate
+  // chunks and re-acks, flash words are never written twice — so every path resynchronizes here.
+  let off=0, sends=0, lastShown=-1;
+  const maxSends=Math.ceil(image.length/128)*2+64;
+  while(off<image.length){
+    const len=Math.min(128,image.length-off);
+    await fwupSend([0x21,...u32le(off),len,...image.subarray(off,off+len)]);
+    if(++sends>maxSends) throw new Error("transfer not converging at offset "+off);
+    for(let reads=0;reads<8;reads++){
+      a=await fwupAckWait(2500);
+      if(a===null) break; // timeout: resend this chunk
+      if(a.status===3){ off=a.off; break; } // firmware says where it wants us — resend from there
+      if(a.status!==0) throw new Error("chunk rejected at offset "+off+": "+(FWUP_ERR[a.status]||("code "+a.status)));
+      if(a.off>off){ off=a.off; break; } // progress
+      // else: stale ack — keep reading, the real one is behind it
+    }
+    const pct=Math.floor(off*50/image.length)*2;
+    if(pct!==lastShown){ lastShown=pct; updateUf2UI("Sending "+pct+"%"); }
+  }
+  updateUf2UI("Verifying…"); // firmware CRC32s the staged flash, then commits the apply-on-reboot record
+  a=await fwupCtl([0x22],8000,"verify+commit");
+  if(a.status) throw new Error("verify+commit rejected: "+(FWUP_ERR[a.status]||("code "+a.status)));
+  log("image staged + CRC-verified on the puck — update armed");
+  updateUf2UI("Rebooting…");
+  try{ await fwupSend([0x23]); }catch(e){} // device drops mid-call; that's the point
+  log("rebooting to apply: the puck goes dark ~5 s while the new firmware is written, then re-enumerates — the panel reconnects itself");
+}
 $("#uf2Pick").onclick=()=>{ $("#uf2File").click(); };
-$("#uf2File").onchange=(e)=>{
-  selectedUf2File = e.target.files?.[0] || null;
+$("#uf2File").onchange=async(e)=>{
+  const f=e.target.files && e.target.files[0];
+  e.target.value=""; // allow re-picking the same filename after a rebuild
+  if(!f) return;
+  try{
+    const image=uf2ToImage(await f.arrayBuffer());
+    selectedUf2={name:f.name, image};
+    log("UF2 ready: "+f.name+" — app image "+Math.round(image.length/1024)+" KiB, CRC32 0x"+crc32(image).toString(16).padStart(8,"0"));
+  }catch(err){
+    selectedUf2=null;
+    log("UF2 rejected: "+err.message);
+  }
   updateUf2UI();
-  if(selectedUf2File) log("UF2 selected: " + selectedUf2File.name);
 };
 $("#uf2Flash").onclick=async()=>{
-  if(!selectedUf2File){ log("Pick a UF2 file first"); return; }
-  if(typeof window.showDirectoryPicker !== "function"){
-    log("Browser file-write API unavailable. Use UF2 DFU, then drag/drop manually.");
+  if(dfuBusy || !selectedUf2) return;
+  if(!dev){ log("connect to the puck first — the update travels over this WebUSB connection"); return; }
+  if(!lastP || lastP[0]<15){
+    log("this puck's firmware predates panel updates (needs status v15+) — update once via UF2 DFU + drag-and-drop, then this button works");
     return;
   }
-  const msg =
-    "Copy " + selectedUf2File.name + " to the UF2BOOT/NRF52BOOT drive?\n\n"
-    + "If the puck is not already in UF2 bootloader mode, click UF2 DFU first.";
-  if(!confirm(msg)) return;
+  if(!confirm("Flash "+selectedUf2.name+" ("+Math.round(selectedUf2.image.length/1024)+" KiB)?\n\n"
+    +"The image is sent over WebUSB into spare flash (~15 s), verified on the puck, and applied on an automatic "
+    +"reboot (~5 s dark). Nothing is armed until it verifies, so a failed or interrupted transfer leaves the "
+    +"current firmware untouched. Worst case (power cut during the apply itself) the puck comes back as the "
+    +"UF2BOOT drive for drag-and-drop recovery — it cannot end up half-flashed.")) return;
+  dfuBusy=true; updateUf2UI();
+  polling=false;        // the IN pipe belongs to the update acks now
+  await dfuSleep(800);  // let an in-flight status poll finish its read first
   try{
-    const dir = await window.showDirectoryPicker({mode:"readwrite"});
-    const buf = await selectedUf2File.arrayBuffer();
-    const fh = await dir.getFileHandle(selectedUf2File.name, {create:true});
-    const wr = await fh.createWritable();
-    await wr.write(buf);
-    await wr.close();
-    const sizeKiB = Math.round(buf.byteLength / 1024);
-    log("UF2 copied: " + selectedUf2File.name + " (" + sizeKiB
-      + " KiB). Device should reboot automatically within a few seconds.");
+    await fwupRun(selectedUf2.image);
   }catch(e){
-    if(e.name === "AbortError")
-      log("UF2 copy canceled.");
-    else
-      log("UF2 copy failed: " + e.message);
+    log("firmware update FAILED: "+e.message+" — nothing was applied; the running firmware is untouched");
+    try{ await dev.transferOut(epOut,new Uint8Array([0x24])); }catch(_e){} // best-effort disarm
+    if(dev) startPolling();
+  }finally{
+    dfuBusy=false; updateUf2UI();
   }
 };
 $("#backupExport").onclick=exportBackup;
@@ -1155,12 +1276,6 @@ $("#dfuUf2").onclick=async()=>{
   if(!dev){ log("not connected"); return; }
   if(!confirm("Reboot into UF2 bootloader?\n\nThe puck will disconnect and mount as a USB drive. Drag the .uf2 file onto it to flash.")) return;
   await send([0x0C]); log("UF2 bootloader reboot sent — device disconnecting");
-};
-$("#uf2Next").onclick=async()=>{
-  if(!dev){ log("not connected"); return; }
-  const on=$("#uf2Next").classList.contains("active");
-  await setField(30, on?0:1);
-  log(on?"UF2-on-reboot cleared":"UF2-on-reboot armed - next reboot enters UF2 bootloader");
 };
 $("#factoryErase").onclick=async()=>{
   if(!dev){ log("not connected"); return; }

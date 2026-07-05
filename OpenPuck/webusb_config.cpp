@@ -45,16 +45,16 @@ static void fwupAckPost(uint8_t status)
 //                [pollPeriod_lo][pollPeriod_hi][logEnabled][battery%][rssi|dBm|]
 //                [gitDirty][buildId 12B ASCII, NUL-padded][rumbleScale][swPro120][swGyroScale10][raw accel ax ay az 3x s16 LE]
 //                [bondedCount][slot0_up][slot0_batt][slot0_rssi]...[slot3_up][slot3_batt][slot3_rssi]
-//                [v10: per-type cfg, 4x8B: ET_XBOX/SWITCH/DS4/DS5 each {back0..3, qam, abSwap, padHaptics, ledBright}]
+//                [v10/v17: per-type cfg, 4x9B: ET_XBOX/SWITCH/DS4/DS5 each {back0..3, qam, abSwap, padHaptics, ledBright, rumble}]
 //                [v11: resetReason(RR_* code)][resetReas raw u32 LE][rxWin/10 us][hapticBlockOn][hapticBlock s]
 // p[6]/p[7]/p[8..11] mirror the ACTIVE type (legacy display). v11 extends to 113 bytes (115 total incl header);
 // browser reads with transferIn(128) to span the two USB-FS packets.
 //                [diag: crc/s][noRx/s][rfStallRecover count]
 //                [v12: relayps(lo,hi)][clkLfSrc][clkHfSrc][usPerMs(lo,hi)][hangStage][curStage][stallMs/40][ringFault(lo,hi)][hangPC u32][hangLR u32][usbdStackFree(lo,hi)][loopStackFree(lo,hi)]
-//                [v13: per-slot link stats, 4x9B from p[141]: {pollsps u16, f1ps u16, newps u16, crc/s u8,
+//                [v13: per-slot link stats, 4x9B from p[145]: {pollsps u16, f1ps u16, newps u16, crc/s u8,
 //                 noRx/s u8, relay/s u8} -- each controller's own rates (the v4 aggregates are their sums)]
-//                [v14: p[177] landAll87 (verbatim-0x87-relay experiment toggle)]
-#define WB_PAYLEN 176
+//                [v14/v17: p[181] landAll87 (verbatim-0x87-relay experiment toggle)]
+#define WB_PAYLEN 180
 // The blob send is drop-on-full (never blocks loop), so the vendor TX FIFO MUST be able to hold a whole blob
 // -- otherwise tud_vendor_write_available() never reaches the frame size and EVERY frame is dropped (blank
 // panel / stale mappings). The Makefile sets -DCFG_TUD_VENDOR_TX_BUFSIZE=256; guard it here so a build without
@@ -79,12 +79,13 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (16 = +configurable lizard-map ops 0x11..0x15 / 0xAA frame, payload unchanged -- the
-	// panel MUST see >=16 before it dares send 0x11, or a blocking readLizard() would hang forever against a
-	// firmware that silently drops the unknown op; 15 = +staged firmware-update ops 0x20..0x24; 14 = +landAll87
-	// toggle; 13 = +per-slot link stats; 12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 =
-	// +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
-	p[2] = 16;
+	// protocol version (17 = per-type rumble field (TypeCfg k=8), per-type stride 8->9; 16 = +configurable
+	// lizard-map ops 0x11..0x15 / 0xAA frame, payload unchanged -- the panel MUST see >=16 before it dares
+	// send 0x11, or a blocking readLizard() would hang forever against a firmware that silently drops the
+	// unknown op; 15 = +staged firmware-update ops 0x20..0x24; 14 = +landAll87 toggle; 13 = +per-slot link
+	// stats; 12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 = +ledBright per type; 9 = +per-type
+	// cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
+	p[2] = 17;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -167,9 +168,9 @@ static void webusbSendBlob()
 			p[65 + s * 3] = g_linkRssi[s];
 		}
 	}
-	// per-emulated-type button config (protocol v10): 4 types x 8 bytes from p[75]
+	// per-emulated-type button config (v10/v17): 4 types x 9 bytes from p[75]
 	for (int et = 0; et < ET_COUNT; et++) {
-		uint8_t *q = &p[75 + et * 8];
+		uint8_t *q = &p[75 + et * 9];
 		q[0] = g_type[et].back[0];
 		q[1] = g_type[et].back[1];
 		q[2] = g_type[et].back[2];
@@ -178,68 +179,69 @@ static void webusbSendBlob()
 		q[5] = g_type[et].abSwap;
 		q[6] = g_type[et].padHaptics;
 		q[7] = g_type[et].ledBright;
+		q[8] = g_type[et].rumble;
 	}
 	// last-boot reset cause (protocol v11): why we (re)booted -- watchdog hang vs HardFault vs intentional
-	// reboot vs power-on (issue #72). p[107] = RR_* code; p[108..111] = raw RESETREAS for the curious.
-	p[107] = faultDiagReason();
+	// reboot vs power-on (issue #72). p[111] = RR_* code; p[112..115] = raw RESETREAS for the curious.
+	p[111] = faultDiagReason();
 	uint32_t rr = faultDiagResetReas();
-	p[108] = (uint8_t)rr;
-	p[109] = (uint8_t)(rr >> 8);
-	p[110] = (uint8_t)(rr >> 16);
-	p[111] = (uint8_t)(rr >> 24);
+	p[112] = (uint8_t)rr;
+	p[113] = (uint8_t)(rr >> 8);
+	p[114] = (uint8_t)(rr >> 16);
+	p[115] = (uint8_t)(rr >> 24);
 	// Connection tunables (protocol v11): poll RX window in 10us units, post-connect haptic block enable,
 	// and block duration in seconds.
-	p[112] = (uint8_t)(g_rxWin / 10);
-	p[113] = g_hapticBlockOn;
-	p[114] = (uint8_t)(g_hapticBlockMs / 1000);
+	p[116] = (uint8_t)(g_rxWin / 10);
+	p[117] = g_hapticBlockOn;
+	p[118] = (uint8_t)(g_hapticBlockMs / 1000);
 	// RF wedge diagnostics (always populated, even when the link reads down): CRC-fail/s and no-reply/s,
 	// capped at 255. With Polls/s this distinguishes poll-loop-stopped vs RX-dead vs corrupt-replies.
-	p[115] = (uint8_t)(g_crcps > 255 ? 255 : g_crcps);
-	p[116] = (uint8_t)(g_norxps > 255 ? 255 : g_norxps);
-	p[117] = (uint8_t)(g_rfStallRecover > 255 ? 255 : g_rfStallRecover);
+	p[119] = (uint8_t)(g_crcps > 255 ? 255 : g_crcps);
+	p[120] = (uint8_t)(g_norxps > 255 ? 255 : g_norxps);
+	p[121] = (uint8_t)(g_rfStallRecover > 255 ? 255 : g_rfStallRecover);
 	// v12: relay-frame TX rate (separated from true poll cycles -- Polls/s now reads ~250, Relay/s exposes the
 	// host output-report flood that steals reply windows), and the clock fingerprint for clone-board triage.
-	p[118] = (uint8_t)g_relayps;
-	p[119] = (uint8_t)(g_relayps >> 8);
-	p[120] = clockLfSrc();
-	p[121] = clockHfSrc();
+	p[122] = (uint8_t)g_relayps;
+	p[123] = (uint8_t)(g_relayps >> 8);
+	p[124] = clockLfSrc();
+	p[125] = clockHfSrc();
 	uint16_t upm = clockUsPerMs();
-	p[122] = (uint8_t)upm;
-	p[123] = (uint8_t)(upm >> 8);
+	p[126] = (uint8_t)upm;
+	p[127] = (uint8_t)(upm >> 8);
 	// last hang's loop stage (0xFF = last boot wasn't a watchdog/lockup hang, or GPREGRET2 didn't survive)
-	p[124] = faultDiagHangStage();
+	p[128] = faultDiagHangStage();
 	// LIVE hang localization: current loop stage + how long loop() has been stuck (40ms units, capped). When
 	// loop() wedges these keep updating because the blob is sent from the SOF interrupt, not loop().
-	p[125] = faultDiagCurStage();
+	p[129] = faultDiagCurStage();
 	uint32_t sms = faultDiagStallMs();
-	p[126] = (uint8_t)(sms / 40 > 255 ? 255 : sms / 40);
+	p[130] = (uint8_t)(sms / 40 > 255 ? 255 : sms / 40);
 	// relay-ring fault count: non-zero = we caught+recovered a desynced/corrupt ring that would otherwise be an
 	// invisible IRQ-off watchdog hang. A climbing count points at the haptic relay path / memory corruption.
-	p[127] = (uint8_t)g_ringFault;
-	p[128] = (uint8_t)(g_ringFault >> 8);
+	p[131] = (uint8_t)g_ringFault;
+	p[132] = (uint8_t)(g_ringFault >> 8);
 	// PC/LR of the stuck code captured by the WDT pre-reset ISR on the last watchdog hang (0 = none captured =
 	// the hang hard-masked interrupts). Map with addr2line on the .elf to name the function.
 	uint32_t hpc = faultDiagHangPC(), hlr = faultDiagHangLR();
-	p[129] = (uint8_t)hpc;
-	p[130] = (uint8_t)(hpc >> 8);
-	p[131] = (uint8_t)(hpc >> 16);
-	p[132] = (uint8_t)(hpc >> 24);
-	p[133] = (uint8_t)hlr;
-	p[134] = (uint8_t)(hlr >> 8);
-	p[135] = (uint8_t)(hlr >> 16);
-	p[136] = (uint8_t)(hlr >> 24);
+	p[133] = (uint8_t)hpc;
+	p[134] = (uint8_t)(hpc >> 8);
+	p[135] = (uint8_t)(hpc >> 16);
+	p[136] = (uint8_t)(hpc >> 24);
+	p[137] = (uint8_t)hlr;
+	p[138] = (uint8_t)(hlr >> 8);
+	p[139] = (uint8_t)(hlr >> 16);
+	p[140] = (uint8_t)(hlr >> 24);
 	// least-ever free stack (words) on the usbd task (800B total) and loop task -- usbd trending to 0 confirms
 	// the overflow. words, not bytes.
 	uint16_t usbdFree = faultDiagUsbdStackFree(),
 		 loopFree = faultDiagLoopStackFree();
-	p[137] = (uint8_t)usbdFree;
-	p[138] = (uint8_t)(usbdFree >> 8);
-	p[139] = (uint8_t)loopFree;
-	p[140] = (uint8_t)(loopFree >> 8);
+	p[141] = (uint8_t)usbdFree;
+	p[142] = (uint8_t)(usbdFree >> 8);
+	p[143] = (uint8_t)loopFree;
+	p[144] = (uint8_t)(loopFree >> 8);
 	// v13: per-slot link stats -- each controller's own poll/reply/error rates, so the panel's per-slot tabs
 	// no longer conflate every controller into the aggregate numbers above.
 	for (int s = 0; s < NSLOT; s++) {
-		uint8_t *q = &p[141 + s * 9];
+		uint8_t *q = &p[145 + s * 9];
 		q[0] = (uint8_t)g_slotPollsps[s];
 		q[1] = (uint8_t)(g_slotPollsps[s] >> 8);
 		q[2] = (uint8_t)g_slotF1ps[s];
@@ -250,8 +252,8 @@ static void webusbSendBlob()
 		q[7] = g_slotNoRxps[s];
 		q[8] = g_slotRelayps[s];
 	}
-	// v14: verbatim-0x87-relay experiment toggle (panel reflects + toggles it)
-	p[177] = g_landAll87;
+	// v14/v17: verbatim-0x87-relay experiment toggle (panel reflects + toggles it)
+	p[181] = g_landAll87;
 	// CRITICAL: usb_web.write() SPINS (`while (remain && _connected) yield();`) until the IN FIFO drains or the
 	// panel disconnects. If the panel holds the WebUSB interface open but stops reading its IN endpoint -- a
 	// backgrounded tab, or the host briefly not servicing transferIn under load -- the FIFO never empties and
@@ -807,11 +809,11 @@ void webusbPoll()
 
 				// every settable field persists (poll rate is no longer settable)
 				bool persist = true;
-				// per-type cfg writes (protocol v10): field = 40 + et*8 + k, k: 0..3 back, 4 qam, 5 abSwap,
-				// 6 padHaptics, 7 ledBright. Edits g_type[et]; refresh the live mirrors if it's the active type.
-				if (f >= 40 && f < 40 + ET_COUNT * 8) {
-					uint8_t et = (uint8_t)((f - 40) / 8),
-						k = (uint8_t)((f - 40) % 8);
+				// per-type cfg writes (protocol v10/v17): field = 40 + et*9 + k, k: 0..3 back, 4 qam, 5 abSwap,
+				// 6 padHaptics, 7 ledBright, 8 rumble. Edits g_type[et]; refresh the live mirrors if it's the active type.
+				if (f >= 40 && f < 40 + ET_COUNT * 9) {
+					uint8_t et = (uint8_t)((f - 40) / 9),
+						k = (uint8_t)((f - 40) % 9);
 					if (et < ET_COUNT) {
 						if (k < 4)
 							g_type[et].back[k] = v;
@@ -827,6 +829,9 @@ void webusbPoll()
 							g_type[et].ledBright =
 								v > 100 ? 100 :
 									  v;
+						else if (k == 8)
+							g_type[et].rumble =
+								v ? 1 : 0;
 						if (et == g_etype)
 							applyActiveType();
 					}
@@ -944,7 +949,7 @@ void webusbPoll()
 					// (fields 27/28, post-connect haptic block, removed -- permanently disabled)
 
 				// EXPERIMENT: land ALL relayed 0x87 config verbatim (real-puck relay)
-				// instead of the discard-whitelist. Persisted; blob p[177] reflects state.
+				// instead of the discard-whitelist. Persisted; blob p[181] reflects state.
 				case 29:
 					g_landAll87 = v ? 1 : 0;
 					break;

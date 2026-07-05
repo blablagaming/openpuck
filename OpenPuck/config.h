@@ -118,6 +118,7 @@ extern int g_mDiv, g_mFric; // xbox/lizard mouse sensitivity divisor / friction%
 // (0..15 standard, 16=PS Touch Click, 17=PS5 Mute, 18=Switch Capture/Screenshot). qamMap = QAM (3 dots)
 // physical button -> same code space (0 = default/unmapped). abSwap = swap A/B and X/Y (Nintendo layout).
 // padHaptics = 1 keeps the controller's autonomous trackpad haptics, 0 disables them for this type.
+// rumble = 1 enables host rumble relay (default), 0 silences it for this type.
 // ledBright = LED brightness sent to the controller on connect: 0 = no override (controller default),
 // 1-100 = brightness %. Steam sets brightness each session; emulated modes never do, so the controller
 // comes up at full brightness. Setting a value here preserves the preferred brightness across mode switches.
@@ -127,6 +128,7 @@ struct TypeCfg {
 	uint8_t abSwap;
 	uint8_t padHaptics;
 	uint8_t ledBright;
+	uint8_t rumble;
 };
 extern TypeCfg g_type[ET_COUNT];
 extern uint8_t
@@ -139,6 +141,8 @@ extern uint8_t g_back[4];
 extern uint8_t g_qamMap;
 extern uint8_t
 	g_padHaptics; // 1 = trackpad haptics on (default), 0 = disabled for the active type
+// 1 = host rumble relay on (default), 0 = silenced for the active emulated type
+extern uint8_t g_rumble;
 // LED brightness for the active emulated type (0 = no override, 1-100 = brightness %)
 extern uint8_t g_ledBright;
 

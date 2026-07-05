@@ -313,6 +313,9 @@ bool hapticSteamRumble(uint16_t lowFreq, uint16_t highFreq, uint8_t slot)
 		highFreq = (h > 0xFFFF) ? 0xFFFF : (uint16_t)h;
 	}
 	bool on = lowFreq || highFreq;
+	// per-type rumble disable: drop ON commands; zero/stop still pass to clear any queued relay
+	if (on && !g_rumble)
+		return false;
 	// Per-slot settle gate (the per-slot reconnect block + link-up check). 0x82 haptics in Steam mode use the
 	// same gate; for XInput, the host only sends a stream while a controller is connected, so this also doubles
 	// as "no controller here, no relay".

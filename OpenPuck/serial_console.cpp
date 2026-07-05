@@ -40,6 +40,13 @@ void serialConsolePoll()
 				Serial.printf(
 					"# land amp/haptic 0x87 config %s\n",
 					g_landAmp ? "ON" : "off");
+			} else if (!strcmp(line, "CD")) {
+				// A/B: content dedup on the Steam input forward (drop reports whose body minus the
+				// free-running counter is unchanged) -- caps delivered rate at the controller's real
+				// distinct-report rate instead of the poll rate.
+				g_fwdContentDedup = !g_fwdContentDedup;
+				Serial.printf("# content dedup %s\n",
+					      g_fwdContentDedup ? "ON" : "off");
 			} else if (!strcmp(line, "SS")) {
 				// on-demand smoothness snapshot: print the last-second cached rates in ONE line, NOW,
 				// instead of waiting for the guarded 1 Hz "# stat" (which the I45/FC flood starves during

@@ -44,7 +44,7 @@ bool g_e1keepalive = true;
 bool g_connVerbose = false;
 // poll RX-window (us): the poll BUSY-WAITS up to this long for the controller's reply. The reply returns
 // EARLY (EVENTS_END) on a successful poll, so this window is only paid IN FULL on a genuine no-reply --
-// one slot needs (g_rxWin + overhead) < g_pollUs(3000) so a no-reply poll still fits inside the 333 Hz
+// one slot needs (g_rxWin + overhead) < g_pollUs(4000) so a no-reply poll still fits inside the 250 Hz
 // cycle. 1200 is the proven value; it was briefly raised to 2000 (issue-72, delayed-reply tolerance) which
 // dropped the rate. FIXED + not configurable (like g_pollUs): there is no good reason to raise it in the
 // field, and doing so silently starves the poll cycle. Any persisted/old value is ignored.
@@ -137,7 +137,7 @@ static uint8_t g_lastSeq[NSLOT] = { 0 };
 static uint32_t g_stNew[NSLOT] = {};
 static uint32_t g_stCrc[NSLOT] = {}, g_stNoRx[NSLOT] = {};
 static uint32_t g_chF1[3] = { 0, 0, 0 };
-// Cycle gate: fires once per g_pollUs; each fire polls every warm slot so all run at ~333 Hz (oversampling
+// Cycle gate: fires once per g_pollUs; each fire polls every warm slot so all run at ~250 Hz (oversampling
 // the controller's ~270 Hz report generation so no fresh trackpad sample is dropped -- see config.h).
 static uint32_t g_lastPollUs = 0;
 static uint32_t g_connRx = 0;
@@ -786,7 +786,7 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 #define SLOT_QUIET_RETRY_MS 50u
 static unsigned long g_slotLastAttemptMs[NSLOT] = {};
 
-// Drive the connected-mode sequence. The cycle gate fires once per g_pollUs (333 Hz); each fire
+// Drive the connected-mode sequence. The cycle gate fires once per g_pollUs (250 Hz); each fire
 // polls EVERY warm slot back-to-back so all bonded controllers run at full rate regardless of count.
 // "Cold" means the slot WAS connected but has been silent for > SLOT_COLD_MS; slots that have never
 // replied stay warm so new controllers can connect at any time after boot. Cold slots retry every
@@ -826,7 +826,7 @@ static void rfConnStep()
 		return;
 	}
 
-	// Cycle gate: fires once per g_pollUs (333 Hz). On each fire we poll EVERY warm slot
+	// Cycle gate: fires once per g_pollUs (250 Hz). On each fire we poll EVERY warm slot
 	// back-to-back so all bonded controllers run at full rate -- the real puck services all
 	// controllers per cycle. Polling one-slot-per-call instead tied the per-slot rate to the
 	// loop frequency AND split it across slots, collapsing 2 controllers to ~90 Hz.

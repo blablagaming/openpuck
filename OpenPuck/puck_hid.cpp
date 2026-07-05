@@ -14,6 +14,13 @@
 #include <string.h>
 
 uint8_t g_fwdNewOnly = 1;
+// Content dedup for the Steam input forward: only forward a 0x45/0x42 report when its body EXCLUDING the
+// counter byte differs from the last one forwarded on that slot. The controller's counter (rep[1]) FREE-RUNS
+// -- it advances on every reply even with static input -- so the seq-based g_fwdNewOnly can't suppress true
+// repeats, and a poll rate above the controller's ~250 Hz sample rate forwards identical inputs with only the
+// counter bumped (host tester reads >250/s for a <=250 Hz controller). Content dedup is what the real puck
+// effectively does. On by default; console "CD" toggles for A/B.
+uint8_t g_fwdContentDedup = 1;
 SteamPuckController g_steamPuck;
 
 // Cloned puck HID report descriptor: mouse(0x40)+keyboard(0x41)+vendor(FF00) with the 63-byte FEATURE
@@ -726,7 +733,26 @@ void SteamPuckController::onReport45(int slot, const uint8_t *rep, bool fresh,
 		// fresh report that landed while the endpoint was busy (~1 ms after each send), which at
 		// 300+ captured reports/s silently discarded ~a third of them (measured: RF new/s ~313 but
 		// host delivered ~180). Always enqueue; the ring paces delivery to the host without loss.
-		if (fresh || !g_fwdNewOnly)
+		bool send = (fresh || !g_fwdNewOnly);
+		// Content dedup: the counter byte (rep[1]) free-runs, so drop a report whose body AFTER the
+		// counter is byte-identical to the last one forwarded on this slot -- a true repeat (same
+		// physical input, bumped counter), not a new sample. Caps delivery at the controller's real
+		// distinct-report rate instead of the (higher) poll rate. See g_fwdContentDedup above.
+		if (send && g_fwdContentDedup && blen >= 2) {
+			static uint8_t lastBody[NSLOT][53];
+			static uint8_t lastBodyLen[NSLOT] = { 0 };
+			uint8_t clen = (uint8_t)(blen - 1); // bytes after the counter
+			if (clen > sizeof lastBody[0])
+				clen = sizeof lastBody[0];
+			if (lastBodyLen[slot] == clen &&
+			    memcmp(lastBody[slot], rep + 2, clen) == 0)
+				send = false; // identical input, only the counter moved
+			else {
+				lastBodyLen[slot] = clen;
+				memcpy(lastBody[slot], rep + 2, clen);
+			}
+		}
+		if (send)
 			usbTxHid(
 				&hid[slot], rid, rep + 1,
 				blen); // Steam/SDL Triton: input report 0x45 (old) / 0x42 (new fw)

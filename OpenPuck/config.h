@@ -156,16 +156,13 @@ extern uint8_t g_swGyroScale10;
 // persist g_swProRate + g_swGyroScale10 to their flash file
 void swProSaveCfg();
 
-// RF poll cadence: 333 Hz (3000 us). The controller does NOT stream on its own -- the RE air capture
-// (nrf-sniffer HANDOFF.md) shows the puck POLLS (short frame) and the controller auto-ACKs one input
-// frame ~90 us later, so the controller's observed ~137-270 Hz "packet counter" IS the real puck's poll
-// rate (peaking ~270 Hz during a fast trackpad drag). We poll slightly above that peak so a fast drag is
-// never undersampled, without the wasteful stale-ACK repeats that a much higher rate produces (polling
-// faster than the controller refreshes just re-reads the same ACK payload, deduped by seq -> burned
-// airtime, no new samples). The old 250 Hz default sat BELOW the drag peak -> dropped pad samples ->
-// Steam's pad->mouse velocity mapping stair-stepped ("feels like it misses inputs"). Multi-controller
-// degrades gracefully via the rfConnStep catch-up reset.
-#define POLL_US_DEFAULT 3000u
+// RF poll cadence: 250 Hz (4000 us) -- matches the real Valve puck's rate. The controller does NOT stream
+// on its own; the puck POLLS (short frame) and the controller auto-ACKs one input frame per poll (RE air
+// capture, nrf-sniffer HANDOFF.md), and it stuffs fresh IMU into every report, so the DELIVERED report
+// rate simply equals the poll rate. The real puck polls ~230-250 Hz, so we match it here. (The genuine
+// smoothness bug was never the rate -- it was onReport45 dropping ~1/3 of captured reports via a bogus
+// hid.ready() gate; see puck_hid.cpp. Poll rate is live-tunable via console "PR<hz>" for sweeps.)
+#define POLL_US_DEFAULT 4000u
 // host-side HID stream cadence for translated modes (~250 Hz)
 #define USB_STREAM_MS 4u
 // How long a USB suspend must PERSIST before we power the controllers off. A brief selective-suspend

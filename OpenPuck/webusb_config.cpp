@@ -8,6 +8,7 @@
 #include "lizard_map.h"
 #include "build_info.h"
 #include "fault_diag.h"
+#include "fw_update.h"
 #include "usb_tx.h"
 #include <Arduino.h>
 #include <string.h>
@@ -23,6 +24,19 @@ static volatile bool g_blobRequest = false;
 // browser can save them to a file and restore them onto a second puck. Like the status blob, the actual send
 // is deferred to the usbd task (webusbSofDrain) so usb_web.write()/flush() never block loop().
 static volatile bool g_bondExportRequest = false;
+// Firmware-update ack ([0xAB][5][status][nextOff u32 LE]). Like the blob it is written from the usbd task
+// (webusbSofDrain), but unlike the blob it is NEVER dropped -- the panel's transfer flow-control is strict
+// ping-pong on these acks, so an unsent ack just stays pending until the FIFO has room (the panel is
+// actively draining the IN pipe during an update, so that is at most a few SOFs).
+static volatile bool g_fwupAckPend = false;
+static volatile uint8_t g_fwupAckStatus = 0;
+static volatile uint32_t g_fwupAckOff = 0;
+static void fwupAckPost(uint8_t status)
+{
+	g_fwupAckStatus = status;
+	g_fwupAckOff = fwupNextOff();
+	g_fwupAckPend = true;
+}
 
 // blob payload = [ver=10][mode][mDiv][mFric][qamMap(active)][abSwap(active)][back0..3(active)][connSlot(0xFF=none)][linkUp]
 //                [f1ps_lo][f1ps_hi][pollU100][newps_lo][newps_hi][e7b][relayOp][relaySub][fwdNewOnly]
@@ -65,8 +79,10 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// protocol version (14 = +landAll87 toggle; 13 = +per-slot link stats; 12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 = +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
-	p[2] = 14;
+	// protocol version (15 = +staged firmware-update ops 0x20..0x24, payload unchanged; 14 = +landAll87
+	// toggle; 13 = +per-slot link stats; 12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 =
+	// +ledBright per type; 9 = +per-type cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
+	p[2] = 15;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -395,6 +411,20 @@ static void webusbSofDrain(void)
 	// it works even though loop() is dead. drop-on-full in webusbSendBlob keeps it from ever blocking.
 	if (faultDiagStallMs() > 300)
 		g_blobRequest = true;
+	// firmware-update ack first: the panel is blocked on it (ping-pong), and it must never be dropped --
+	// retry every SOF until the FIFO has room.
+	if (g_fwupAckPend && tud_vendor_write_available() >= 7) {
+		uint8_t f[7] = { 0xAB,
+				 5,
+				 g_fwupAckStatus,
+				 (uint8_t)(g_fwupAckOff),
+				 (uint8_t)(g_fwupAckOff >> 8),
+				 (uint8_t)(g_fwupAckOff >> 16),
+				 (uint8_t)(g_fwupAckOff >> 24) };
+		usb_web.write(f, sizeof f);
+		usb_web.flush();
+		g_fwupAckPend = false;
+	}
 	if (g_blobRequest) {
 		g_blobRequest = false;
 		webusbSendBlob();
@@ -449,8 +479,8 @@ void webusbInit(void)
 	tud_sof_cb_enable(true);
 }
 
-// Send the whole lizard binding table as one 0xA7 frame so the panel can edit it:
-//   [0xA7][count][ per binding (16B): outType, outData[0..6], trigMask LE(4), holdMask LE(4) ]
+// Send the whole lizard binding table as one 0xAA frame so the panel can edit it:
+//   [0xAA][count][ per binding (16B): outType, outData[0..6], trigMask LE(4), holdMask LE(4) ]
 // Total = 2 + count*16 (max 2 + 32*16 = 514). The panel reads byte[1]=count and accumulates
 // transferIn packets until it has the full frame.
 static void webusbSendLizard()
@@ -462,9 +492,9 @@ static void webusbSendLizard()
 		count = LZ_MAX_BINDINGS;
 	// static (not stack): 514 B is large for the USB task stack, and webusbPoll is single-threaded.
 	static uint8_t f[2 + LZ_MAX_BINDINGS * 16];
-	// 0xA8, NOT 0xA7: the merge with main added bond-export on 0xA7, so the lizard map moved to the next
-	// free device->host marker (0xA5 status, 0xA6 capture, 0xA7 bond export, 0xA8 lizard map).
-	f[0] = 0xA8;
+	// 0xAA, NOT 0xA7/0xA8: main claimed 0xA7 (bond export) and 0xA8 (flight recorder), plus 0xA9 (wedge
+	// reporter) and 0xAB (fwup ack) -- 0xAA is the free device->host marker for the lizard map.
+	f[0] = 0xAA;
 	f[1] = count;
 	for (uint8_t i = 0; i < count; i++) {
 		const LizardBinding &b = g_lizardMap.bindings[i];
@@ -539,10 +569,10 @@ static void webusbDrainCapture()
 #endif // OPK_LOG
 void webusbPoll()
 {
-	// 40 B holds the largest command: 0x0D writes one bond slot = [0x0D][slot][used][24 rec] = 27 B (still
-	// inside one 64-B USB-FS OUT packet, so no command ever spans packets). The lizard "set binding" command
-	// (0x12) is 18 B; every other command is <= 4 B.
-	static uint8_t buf[40];
+	// 160 B holds the largest command: a firmware-update data chunk 0x21 = [op][off u32][len][<=128 data]
+	// = 134 B (spans USB-FS packets; the byte-wise accumulation below reassembles it). Next-largest are the
+	// 0x0D bond-slot write (27 B) and the 0x12 lizard set-binding (18 B); everything else is <= 9 B.
+	static uint8_t buf[160];
 	static uint8_t n = 0;
 	while (usb_web.available()) {
 		int c = usb_web.read();
@@ -555,22 +585,36 @@ void webusbPoll()
 			if (n == 0)
 				break;
 			uint8_t op = buf[0];
-			if (op < 0x01 || op > 0x15) { // resync: drop one byte
+			if ((op < 0x01 || op > 0x15) &&
+			    (op < 0x20 || op > 0x24)) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
 			}
+			// 0x21 (fwup data) carries its own length at [5]; sanity-gate it BEFORE trusting it as a
+			// command length so a corrupt byte can only cost a one-byte resync, never a stuck parser.
+			if (op == 0x21 && n >= 6) {
+				uint8_t dl = buf[5];
+				if (dl == 0 || dl > 128 || (dl & 3)) {
+					memmove(buf, buf + 1, --n);
+					continue;
+				}
+			}
 			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x12 = set-one-lizard-
 			// binding (18 B); 0x05/0x0E/0x0F/0x10/0x13 carry one value byte; 0x02 a field+value; 0x0A a
-			// 3-byte magic. (0x11/0x14/0x15 are bare opcodes -> default 1.)
-			uint8_t need = (op == 0x0D) ? 27 :
-				       (op == 0x12) ? 18 :
-				       (op == 0x02) ? 3 :
-				       (op == 0x03 || op == 0x05 ||
-					op == 0x0E || op == 0x0F ||
-					op == 0x10 || op == 0x13) ?
-						      2 :
-				       (op == 0x0A) ? 4 :
-						      1;
+			// 3-byte magic. Firmware update: 0x20 begin [size u32][crc32 u32], 0x21 data (6 B header +
+			// payload), 0x22/0x23/0x24 bare. (0x11/0x14/0x15 are bare lizard opcodes -> default 1.)
+			uint8_t need =
+				(op == 0x0D) ? 27 :
+				(op == 0x12) ? 18 :
+				(op == 0x02) ? 3 :
+				(op == 0x03 || op == 0x05 || op == 0x0E ||
+				 op == 0x0F || op == 0x10 || op == 0x13) ?
+					       2 :
+				(op == 0x0A) ? 4 :
+				(op == 0x20) ? 9 :
+				(op == 0x21) ? (uint8_t)(6 + (n >= 6 ? buf[5] :
+								       0)) :
+					       1;
 			if (n < need)
 				break; // wait for more bytes
 			if (op == 0x01) {
@@ -680,7 +724,7 @@ void webusbPoll()
 				// Renumbered to 0x11..0x15 on the merge with main: main already owns 0x0D (bond-slot
 				// write), 0x0E (import commit), 0x0F (stability test) and 0x10 (flight-recorder drain),
 				// which the pre-merge branch had collided with. The panel JS uses the same 0x11..0x15.
-				// 0x11: dump the current map as a 0xA7 frame.
+				// 0x11: dump the current map as a 0xAA frame.
 			} else if (op == 0x11) {
 				webusbSendLizard();
 
@@ -721,6 +765,40 @@ void webusbPoll()
 				defaultLizardMap();
 				saveLizardMap();
 				webusbSendLizard();
+
+				// 0x20..0x24: staged firmware update (see fw_update.h). Each op is acked with an 0xAB
+				// frame from the usbd task; the panel ping-pongs on those acks, so at most one command
+				// is ever in flight (also what bounds the flash-stall per loop() pass to one page erase).
+			} else if (op == 0x20) {
+				uint32_t sz = (uint32_t)buf[1] |
+					      ((uint32_t)buf[2] << 8) |
+					      ((uint32_t)buf[3] << 16) |
+					      ((uint32_t)buf[4] << 24);
+				uint32_t crc = (uint32_t)buf[5] |
+					       ((uint32_t)buf[6] << 8) |
+					       ((uint32_t)buf[7] << 16) |
+					       ((uint32_t)buf[8] << 24);
+				fwupAckPost(fwupBegin(sz, crc));
+			} else if (op == 0x21) {
+				uint32_t off = (uint32_t)buf[1] |
+					       ((uint32_t)buf[2] << 8) |
+					       ((uint32_t)buf[3] << 16) |
+					       ((uint32_t)buf[4] << 24);
+				fwupAckPost(fwupChunk(off, buf + 6, buf[5]));
+			} else if (op == 0x22) {
+				fwupAckPost(fwupEnd());
+
+				// 0x23: plain clean reboot. After a committed 0x22 the boot path applies the staged
+				// image; unarmed it is just a normal restart.
+			} else if (op == 0x23) {
+				usb_web.flush();
+				delay(40);
+				faultDiagArmIntentionalReset();
+				NVIC_SystemReset();
+
+			} else if (op == 0x24) {
+				fwupAbort();
+				fwupAckPost(FWUP_OK);
 
 			} else if (op == 0x02) {
 				uint8_t f = buf[1], v = buf[2];

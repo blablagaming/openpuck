@@ -5,6 +5,7 @@
 #include "haptics.h"
 #include "puck_hid.h"
 #include "triton.h" // g_in raw IMU (diagnostic readout)
+#include "lizard_map.h"
 #include "build_info.h"
 #include "fault_diag.h"
 #include "fw_update.h"
@@ -146,7 +147,9 @@ static void webusbSendBlob()
 	// Switch Pro gyro sensitivity x10 (protocol v6)
 	p[55] = g_swGyroScale10;
 	{
-		int16_t a[3] = { g_in[0].ax, g_in[0].ay, g_in[0].az };
+		// Read the ACTIVE slot's accel, not a hardcoded g_in[0]: a controller bonded to a non-zero
+		// slot leaves g_in[0] zeroed, which made this readout (and lizard) look dead.
+		int16_t a[3] = { g_in[cs].ax, g_in[cs].ay, g_in[cs].az };
 		memcpy(&p[56], a, 6);
 	} // raw accelerometer for scale diagnostics (protocol v7)
 
@@ -475,6 +478,42 @@ void webusbInit(void)
 	// boards whose bootloader wipes retained RAM. Cheap: the callback no-ops unless loop() is already stalled.
 	tud_sof_cb_enable(true);
 }
+
+// Send the whole lizard binding table as one 0xAA frame so the panel can edit it:
+//   [0xAA][count][ per binding (16B): outType, outData[0..6], trigMask LE(4), holdMask LE(4) ]
+// Total = 2 + count*16 (max 2 + 32*16 = 514). The panel reads byte[1]=count and accumulates
+// transferIn packets until it has the full frame.
+static void webusbSendLizard()
+{
+	if (!usb_web.connected())
+		return;
+	uint8_t count = g_lizardMap.count;
+	if (count > LZ_MAX_BINDINGS)
+		count = LZ_MAX_BINDINGS;
+	// static (not stack): 514 B is large for the USB task stack, and webusbPoll is single-threaded.
+	static uint8_t f[2 + LZ_MAX_BINDINGS * 16];
+	// 0xAA, NOT 0xA7/0xA8: main claimed 0xA7 (bond export) and 0xA8 (flight recorder), plus 0xA9 (wedge
+	// reporter) and 0xAB (fwup ack) -- 0xAA is the free device->host marker for the lizard map.
+	f[0] = 0xAA;
+	f[1] = count;
+	for (uint8_t i = 0; i < count; i++) {
+		const LizardBinding &b = g_lizardMap.bindings[i];
+		uint8_t *q = &f[2 + i * 16];
+		q[0] = b.outType;
+		for (int k = 0; k < 7; k++)
+			q[1 + k] = b.outData[k];
+		q[8] = (uint8_t)b.trigMask;
+		q[9] = (uint8_t)(b.trigMask >> 8);
+		q[10] = (uint8_t)(b.trigMask >> 16);
+		q[11] = (uint8_t)(b.trigMask >> 24);
+		q[12] = (uint8_t)b.holdMask;
+		q[13] = (uint8_t)(b.holdMask >> 8);
+		q[14] = (uint8_t)(b.holdMask >> 16);
+		q[15] = (uint8_t)(b.holdMask >> 24);
+	}
+	usb_web.write(f, (uint16_t)(2 + count * 16));
+	usb_web.flush();
+}
 #if OPK_LOG
 // Stream the capture ring (haptics / relayed host commands) to the panel as 0xA6 frames. Frame formats:
 //   entry: [0xA6][L][T=1][age u32 LE][slot][rid][n][bytes n]   (L = 8 + n)
@@ -531,8 +570,8 @@ static void webusbDrainCapture()
 void webusbPoll()
 {
 	// 160 B holds the largest command: a firmware-update data chunk 0x21 = [op][off u32][len][<=128 data]
-	// = 134 B (spans USB-FS packets; the byte-wise accumulation below reassembles it). Next-largest is the
-	// 0x0D bond-slot write (27 B); everything else is <= 9 B.
+	// = 134 B (spans USB-FS packets; the byte-wise accumulation below reassembles it). Next-largest are the
+	// 0x0D bond-slot write (27 B) and the 0x12 lizard set-binding (18 B); everything else is <= 9 B.
 	static uint8_t buf[160];
 	static uint8_t n = 0;
 	while (usb_web.available()) {
@@ -546,7 +585,7 @@ void webusbPoll()
 			if (n == 0)
 				break;
 			uint8_t op = buf[0];
-			if ((op < 0x01 || op > 0x10) &&
+			if ((op < 0x01 || op > 0x15) &&
 			    (op < 0x20 || op > 0x24)) { // resync: drop one byte
 				memmove(buf, buf + 1, --n);
 				continue;
@@ -560,14 +599,16 @@ void webusbPoll()
 					continue;
 				}
 			}
-			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x05/0x0E/0x0F/0x10 carry
-			// one value byte; 0x02 a field+value; 0x0A a 3-byte magic. Firmware update: 0x20 begin
-			// [size u32][crc32 u32], 0x21 data (6 B header + payload), 0x22/0x23/0x24 bare.
+			// Command length (fixed per opcode). 0x0D = write-one-bond-slot (27 B); 0x12 = set-one-lizard-
+			// binding (18 B); 0x05/0x0E/0x0F/0x10/0x13 carry one value byte; 0x02 a field+value; 0x0A a
+			// 3-byte magic. Firmware update: 0x20 begin [size u32][crc32 u32], 0x21 data (6 B header +
+			// payload), 0x22/0x23/0x24 bare. (0x11/0x14/0x15 are bare lizard opcodes -> default 1.)
 			uint8_t need =
 				(op == 0x0D) ? 27 :
+				(op == 0x12) ? 18 :
 				(op == 0x02) ? 3 :
 				(op == 0x03 || op == 0x05 || op == 0x0E ||
-				 op == 0x0F || op == 0x10) ?
+				 op == 0x0F || op == 0x10 || op == 0x13) ?
 					       2 :
 				(op == 0x0A) ? 4 :
 				(op == 0x20) ? 9 :
@@ -678,6 +719,52 @@ void webusbPoll()
 				delay(40);
 				faultDiagArmIntentionalReset();
 				NVIC_SystemReset();
+
+				// ---- lizard (desktop) binding map editor ----
+				// Renumbered to 0x11..0x15 on the merge with main: main already owns 0x0D (bond-slot
+				// write), 0x0E (import commit), 0x0F (stability test) and 0x10 (flight-recorder drain),
+				// which the pre-merge branch had collided with. The panel JS uses the same 0x11..0x15.
+				// 0x11: dump the current map as a 0xAA frame.
+			} else if (op == 0x11) {
+				webusbSendLizard();
+
+				// 0x13 [count]: BEGIN a map edit -- set the binding count (clamped). The
+				// panel then sends one 0x12 per binding (0..count-1) and a 0x14 to persist.
+			} else if (op == 0x13) {
+				g_lizardMap.count =
+					(buf[1] <= LZ_MAX_BINDINGS) ?
+						buf[1] :
+						LZ_MAX_BINDINGS;
+
+				// 0x12 [idx][outType][od0..6][trig LE4][hold LE4]: set one binding.
+			} else if (op == 0x12) {
+				uint8_t idx = buf[1];
+				if (idx < LZ_MAX_BINDINGS) {
+					LizardBinding &b =
+						g_lizardMap.bindings[idx];
+					b.outType = buf[2];
+					for (int k = 0; k < 7; k++)
+						b.outData[k] = buf[3 + k];
+					b.trigMask = (uint32_t)buf[10] |
+						     ((uint32_t)buf[11] << 8) |
+						     ((uint32_t)buf[12] << 16) |
+						     ((uint32_t)buf[13] << 24);
+					b.holdMask = (uint32_t)buf[14] |
+						     ((uint32_t)buf[15] << 8) |
+						     ((uint32_t)buf[16] << 16) |
+						     ((uint32_t)buf[17] << 24);
+				}
+
+				// 0x14: COMMIT the edited map to flash and echo it back.
+			} else if (op == 0x14) {
+				saveLizardMap();
+				webusbSendLizard();
+
+				// 0x15: reset the map to the built-in defaults, persist, echo back.
+			} else if (op == 0x15) {
+				defaultLizardMap();
+				saveLizardMap();
+				webusbSendLizard();
 
 				// 0x20..0x24: staged firmware update (see fw_update.h). Each op is acked with an 0xAB
 				// frame from the usbd task; the panel ping-pongs on those acks, so at most one command

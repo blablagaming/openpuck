@@ -108,7 +108,11 @@ int g_curSlot = -1;
 // +4 per cycle = 0 mod 4, so each slot's GET PID is constant => the controller never dequeues => ~60 new/s
 // instead of ~400. Each slot's counter increments once per poll-of-that-slot so it cycles 0,1,2,3 cleanly.
 static uint8_t g_pollPid[NSLOT] = {};
-static uint8_t g_relayPid[NSLOT] = {};
+// Relay PID is offset by 2 from poll PID so the two never share the same
+// 2-bit PID value in the same cycle. Both counters advance once per cycle;
+// starting 2 apart keeps them 2 apart (mod 4) forever, preventing the
+// controller from deduplicating the E3 GET as a retransmit of the relay.
+static uint8_t g_relayPid[NSLOT] = { 2, 2, 2, 2 };
 // All link statistics are PER SLOT: each controller's polls/replies/errors are counted (and reported --
 // serial stat line, WebUSB blob v13) against that controller only. The old scalar counters merged every
 // slot into one number, so the panel couldn't tell "controller B is drowning" from "everything is slow".

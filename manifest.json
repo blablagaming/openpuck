@@ -11,6 +11,12 @@
  "OpenPuck-0.9.10-standard.uf2": {
   "panelUpdate": true
  },
+ "OpenPuck-0.9.17-factory-reset.uf2": {
+  "panelUpdate": true
+ },
+ "OpenPuck-0.9.17-standard.uf2": {
+  "panelUpdate": true
+ },
  "OpenPuck-0.9.6-factory-reset.uf2": {
   "panelUpdate": false
  },

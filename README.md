@@ -70,6 +70,7 @@ You can copy configurations between OpenPucks using the export/import card in th
 
 # 3D Printed Cases
 - [jaki-gh](https://github.com/jaki-gh) has contributed a 3D printable housing with OpenPuck written on it alongside a Steam logo. You can find that [here](https://www.thingiverse.com/thing:7371668).
+- [BOT-Yanni](https://www.reddit.com/user/BOT-Yanni/) designed a slim case with OpenPuck written on it and a cute little glyph of the Steam Controller. You can find that [here](https://www.thingiverse.com/thing:7379316).
 - [StonnedModder](https://www.printables.com/model/1760684-openpuck-promicro-nrf52840-case) built a case meant to accomodate a USB C to USB A adapter which you can find [here](https://www.printables.com/model/1760684-openpuck-promicro-nrf52840-case).
 - Another plain case for these pro micros can be found [here](https://www.printables.com/model/1285346-pro-micro-nicenano-nrf52840-dongle-case/collections).
 

@@ -224,23 +224,29 @@ static void jcPackStick(uint8_t s[3], int16_t x, int16_t y)
 	s[2] = (uint8_t)((Y >> 4) & 0xFF);
 }
 
-#define JC_BATTERY_MAX 8u
-#define JC_BATTERY_PERCENT_MAX 100u
-
-// Round battery % up onto the 0..8 Switch scale so 1..12% stays at level 1.
+// The Switch battery/connection byte (bat_con) is NOT a 0..8 value in the high nibble. Per hid-nintendo it is:
+//   bits[7:5] = battery capacity (0=empty .. 4=full), bit4 = charging, bit0 = host_powered (USB-powered).
+// A genuine pad therefore only ever emits the EVEN high-nibble levels 8/6/4/2/0 (full/medium/low/critical/empty)
+// -- the odd bit (bit4) is reserved for the charging flag. The old code packed a 0..8 value straight into the
+// high nibble, so any ODD level (1,3,5,7) set bit4 and the console showed the pad as "charging". Here we round
+// the percentage onto the genuine 5-level scale and return the ready-to-place EVEN nibble {0,2,4,6,8}.
 static uint8_t jcBatteryNibble(uint8_t bond)
 {
 	if (bond >= NSLOT)
 		return 0;
 	uint8_t pct = g_battery[bond];
-	if (!pct)
-		return 0;
-
-	// Ceiling division so non-zero percentages don't truncate to 0 on the 0..8 scale.
-	uint8_t lvl = (uint8_t)(((uint16_t)pct * JC_BATTERY_MAX +
-				 (JC_BATTERY_PERCENT_MAX - 1u)) /
-				JC_BATTERY_PERCENT_MAX);
-	return (lvl > JC_BATTERY_MAX) ? JC_BATTERY_MAX : lvl;
+	uint8_t cap; // genuine 0..4 capacity
+	if (pct >= 70)
+		cap = 4; // full
+	else if (pct >= 50)
+		cap = 3; // medium
+	else if (pct >= 30)
+		cap = 2; // low
+	else if (pct >= 10)
+		cap = 1; // critical
+	else
+		cap = 0; // empty
+	return (uint8_t)(cap << 1); // -> 0,2,4,6,8 (even; leaves bit4 clear)
 }
 // Standard input-report prefix [0..11] (timer, battery/conn, 3 button bytes, both packed sticks, vibrator),
 // shared by the streamed 0x30 report and the 0x21 subcommand-reply reports the host reads during init.
@@ -304,9 +310,13 @@ static void jcInputPrefix(uint8_t slot, uint8_t *out)
 		jc |= codeToJc(g_qamMap, fA, fB, fX, fY);
 	out[0] = g_jcTimer[slot]++;
 
-	// [7:4]=battery (0..8), [3:0]=connection_info. Keep it connected (1), but never set charging so the
-	// Switch UI doesn't pin the emulated pad in the charging state.
-	out[1] = (uint8_t)((jcBatteryNibble(bond) << 4) | 0x01);
+	// bat_con byte: [7:5]=capacity, bit4=charging, bit0=host_powered (see jcBatteryNibble). The controllers are
+	// wireless (battery powered) from the console's view, so host_powered=0 -- setting it pins the pad the console
+	// treats as the wired/primary device in the charging state (the first-enumerated pad showing "charging, 100%").
+	// The charging flag reflects the controller's REAL EChargeState (2=charging); wireless pads report discharging
+	// (1) so it stays clear, but a pad genuinely on a charger will show the bolt correctly.
+	uint8_t chg = (bond < NSLOT && g_batteryState[bond] == 2) ? 0x10 : 0x00;
+	out[1] = (uint8_t)((jcBatteryNibble(bond) << 4) | chg);
 	out[2] = (uint8_t)(jc);
 	out[3] = (uint8_t)(jc >> 8);
 	out[4] = (uint8_t)(jc >> 16);
